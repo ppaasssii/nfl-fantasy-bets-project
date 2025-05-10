@@ -1,0 +1,53 @@
+# IDE - IntelliJ
+.idea/
+*.iml
+*.ipr
+*.iws
+out/
+target/ # If you ever use Java/Maven/Gradle
+
+# OS generated files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Node.js
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+*.env
+.env.*
+.env*.local
+# Exceptions for example env files
+!.env.example
+!.env.production.example
+!.env.development.example
+
+# Supabase
+supabase/. DONT ADD THIS if you want to commit your functions code
+supabase/.branches/
+supabase/.temp/
+supabase/db-diff.ignore # Add this if you use db diffs and want to ignore certain schemas
+supabase/functions/. DONT ADD THIS
+supabase/functions/*/node_modules/ # If functions have their own node_modules
+supabase/.supabase/ # Local Supabase Docker stuff
+
+# Frontend specific (if inside a frontend subfolder)
+frontend/node_modules/
+frontend/.env
+frontend/.env.*
+frontend/.env*.local
+frontend/dist/
+frontend/.DS_Store
+frontend/.eslintcache
+
+# Logs
+logs
+*.log
