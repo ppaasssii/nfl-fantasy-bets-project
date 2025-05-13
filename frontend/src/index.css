@@ -1,0 +1,11 @@
+/* src/index.css */
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+body {
+  @apply bg-sleeper-bg text-sleeper-text-primary; /* Apply base dark theme from your config */
+  font-family: 'Inter', sans-serif; /* A good default sans-serif font, or choose another */
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}

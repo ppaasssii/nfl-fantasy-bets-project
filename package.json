@@ -10,6 +10,12 @@
   "author": "",
   "license": "ISC",
   "devDependencies": {
+    "@tailwindcss/forms": "^0.5.10",
     "supabase": "^2.22.12"
+  },
+  "dependencies": {
+    "@supabase/supabase-js": "^2.49.4",
+    "react-router-dom": "^7.6.0",
+    "react-toastify": "^11.0.5"
   }
 }
