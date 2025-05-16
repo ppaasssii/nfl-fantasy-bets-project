@@ -29,6 +29,7 @@ lerna-debug.log*
 !.env.example
 !.env.production.example
 !.env.development.example
+.env
 
 # Supabase
 supabase/. DONT ADD THIS if you want to commit your functions code

@@ -1,248 +1,311 @@
-// src/components/GameDetailPage.tsx
-import React, { useEffect, useState } from 'react';
-import { useParams, Link as RouterLink } from 'react-router-dom';
-import { supabase } from '../supabaseClient';
-import { type AvailableBetWithBetType, type Game as GameBaseType } from './GameList'; // Re-use types
-import { useDashboardContext } from '../App'; // Use the context from DashboardLayout
+// File: frontend/src/components/GameDetailPage.tsx
 
-interface GameDetail extends GameBaseType {
-    available_bets: AvailableBetWithBetType[];
+import { useEffect, useState, useMemo, useCallback } from 'react';
+import { useParams, Link, useOutletContext } from 'react-router-dom';
+import { supabase } from '../supabaseClient';
+import { toast } from 'react-toastify';
+import { Disclosure } from '@headlessui/react';
+import { ChevronUpIcon, ArrowLeftIcon } from '@heroicons/react/20/solid'; // Assuming you use Heroicons
+
+// Types (ensure these align with your global types or define them here if not already)
+interface Game {
+    id: number;
+    api_game_id: string;
+    home_team: string;
+    away_team: string;
+    game_time: string;
+    status: string;
+    home_score?: number;
+    away_score?: number;
 }
 
-const extractPlayerName = (selectionName: string, betTypeName: string): string | null => {
-    if (betTypeName.toLowerCase().includes('player')) {
-        const parts = selectionName.split(' ');
-        let nameParts = [];
-        for (const part of parts) {
-            if (['Over', 'Under', 'Yes', 'No', 'Pts', 'Yds', 'TDs', 'Receptions', 'Sacks', 'INTs', '+', '-'].some(term => part.startsWith(term)) || !isNaN(parseFloat(part))) {
-                break;
-            }
-            nameParts.push(part);
-        }
-        return nameParts.length > 0 ? nameParts.join(' ') : `Player (${selectionName.substring(0,15)}...)`;
-    }
-    return null;
-};
+interface BetType {
+    id: number;
+    name: string;
+    api_market_key: string;
+    description?: string;
+}
 
-const groupBetsByMarketForDetailPage = (bets: AvailableBetWithBetType[], gameHomeTeam: string, gameAwayTeam: string) => {
-    const mainMarkets = { moneyline: [] as AvailableBetWithBetType[], spread: [] as AvailableBetWithBetType[], total: [] as AvailableBetWithBetType[] };
-    const periodMarkets: Record<string, { name: string, moneyline: AvailableBetWithBetType[], spread: AvailableBetWithBetType[], total: AvailableBetWithBetType[], teamTotals: AvailableBetWithBetType[], evenOdd: AvailableBetWithBetType[] }> = {};
-    const playerProps: Record<string, Record<string, AvailableBetWithBetType[]>> = {};
-    const teamProps: AvailableBetWithBetType[] = []; // For game-level team totals & E/O not tied to a specific sub-period
+interface AvailableBet {
+    id: number;
+    game_id: number;
+    bet_type_id: number;
+    selection_name: string;
+    odds: number;
+    line?: number;
+    is_active: boolean;
+    is_winning_outcome?: boolean;
+    source_bookmaker?: string;
+    api_last_update?: string;
+    bet_type?: BetType; // Joined data
+}
 
-    bets.forEach(bet => {
-        const key = bet.bet_types.api_market_key;
-        const periodMatch = key.match(/^(1q|2q|3q|4q|1h|2h)_/);
-        const period = periodMatch ? periodMatch[1].toUpperCase() : null;
+interface BetSelection {
+    odd: AvailableBet;
+    // any other properties for a selection if needed
+}
 
-        if (key.startsWith('player_')) {
-            const playerName = extractPlayerName(bet.selection_name, bet.bet_types.name) || "Unknown Player";
-            // A more refined propType, trying to get the core stat name
-            let propType = bet.bet_types.name.replace(/Player\s*/i, '').replace(/\s*O\/U|\s*Yes\/No/i, '').trim();
-            if (propType.toLowerCase().includes(playerName.toLowerCase())) { // Avoid player name in prop type display
-                propType = propType.replace(new RegExp(playerName, 'i'), '').trim();
-            }
-
-            if (!playerProps[playerName]) playerProps[playerName] = {};
-            if (!playerProps[playerName][propType]) playerProps[playerName][propType] = [];
-            playerProps[playerName][propType].push(bet);
-        } else if (period) {
-            if (!periodMarkets[period]) periodMarkets[period] = { name: `${period} Bets`, moneyline: [], spread: [], total: [], teamTotals: [], evenOdd: [] };
-            if (key.endsWith('_ml')) periodMarkets[period].moneyline.push(bet);
-            else if (key.endsWith('_sp')) periodMarkets[period].spread.push(bet);
-            else if (key.endsWith('_totals_ou')) periodMarkets[period].total.push(bet);
-            else if (key.includes('_team_points_') && key.endsWith('_ou')) periodMarkets[period].teamTotals.push(bet);
-            else if (key.includes('_eo')) periodMarkets[period].evenOdd.push(bet);
-        } else if (key === 'h2h') {
-            mainMarkets.moneyline.push(bet);
-        } else if (key === 'spreads') {
-            mainMarkets.spread.push(bet);
-        } else if (key === 'totals') {
-            mainMarkets.total.push(bet);
-        } else if ((key.startsWith('team_points_') && key.endsWith('_ou')) ||
-            (key.startsWith('game_total_eo')) ||
-            (key.startsWith('team_points_') && key.endsWith('_eo'))) {
-            teamProps.push(bet);
-        }
-    });
-    return { mainMarkets, periodMarkets, playerProps, teamProps };
-};
+// For context passed from DashboardLayout
+interface DashboardLayoutContext {
+    session: any; // Replace 'any' with your actual Session type from Supabase
+    betSlip: BetSelection[];
+    addToBetSlip: (odd: AvailableBet) => void;
+    removeFromBetSlip: (oddId: number) => void;
+    isOddInBetSlip: (oddId: number) => boolean;
+}
 
 
-const GameDetailPage: React.FC = () => {
-    const { gameId } = useParams<{ gameId: string }>();
-    const { onSelectBet, selectedBetIds } = useDashboardContext();
-    const [gameDetail, setGameDetail] = useState<GameDetail | null>(null);
+function GameDetailPage() {
+    const { gameApiId } = useParams<{ gameApiId: string }>();
+    const [game, setGame] = useState<Game | null>(null);
+    const [oddsData, setOddsData] = useState<AvailableBet[] | null>(null);
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState<string | null>(null);
 
-    useEffect(() => {
-        if (!gameId) {
-            setError("No game ID provided.");
+    const { addToBetSlip, isOddInBetSlip } = useOutletContext<DashboardLayoutContext>();
+
+    const fetchGameDetails = useCallback(async () => {
+        setLoading(true);
+        setError(null);
+        try {
+            // Fetch game details
+            const { data: gameDetails, error: gameError } = await supabase
+                .from('games')
+                .select('*')
+                .eq('api_game_id', gameApiId)
+                .single();
+
+            if (gameError) throw gameError;
+            if (!gameDetails) throw new Error('Game not found.');
+            setGame(gameDetails);
+
+            // Fetch odds for this game, joining with bet_types
+            const { data: fetchedOdds, error: oddsError } = await supabase
+                .from('available_bets')
+                .select(`
+                    *,
+                    bet_type:bet_types(id, name, api_market_key, description)
+                `)
+                .eq('game_id', gameDetails.id)
+                .eq('is_active', true) // Only fetch active odds
+                .order('bet_type_id', { ascending: true })
+                .order('line', { ascending: true, nullsFirst: true })
+                .order('selection_name', { ascending: true });
+
+
+            if (oddsError) throw oddsError;
+            setOddsData(fetchedOdds as AvailableBet[]);
+
+        } catch (err) {
+            console.error('Error fetching game details or odds:', err);
+            const errorMessage = err instanceof Error ? err.message : 'An unknown error occurred.';
+            setError(errorMessage);
+            toast.error(`Failed to load game data: ${errorMessage}`);
+        } finally {
             setLoading(false);
-            return;
         }
+    }, [gameApiId]);
 
-        const fetchGameDetails = async () => {
-            setLoading(true);
-            setError(null);
-            try {
-                const { data: gameData, error: gameError } = await supabase
-                    .from('games')
-                    .select(`
-                        id, api_game_id, home_team, away_team, game_time, status,
-                        available_bets!inner (
-                            id, selection_name, odds, line, is_active, source_bookmaker,
-                            bet_types!inner (name, api_market_key)
-                        )
-                    `)
-                    .eq('id', gameId)
-                    .eq('available_bets.is_active', true)
-                    .single();
+    useEffect(() => {
+        if (gameApiId) {
+            fetchGameDetails();
+        }
+    }, [gameApiId, fetchGameDetails]);
 
-                if (gameError) throw gameError;
-                if (!gameData) {
-                    setError("Game not found or no active odds available.");
-                    setGameDetail(null);
-                } else {
-                    const betsWithGameContext = (gameData.available_bets as AvailableBetWithBetType[]).map(b => ({
-                        ...b,
-                        games: {
-                            id: gameData.id,
-                            home_team: gameData.home_team,
-                            away_team: gameData.away_team,
-                            game_time: gameData.game_time
-                        }
-                    }));
-                    setGameDetail({ ...gameData, available_bets: betsWithGameContext });
-                }
-            } catch (err: any) {
-                console.error("Error fetching game details:", err);
-                setError(err.message || "Failed to load game details.");
-                setGameDetail(null);
-            } finally {
-                setLoading(false);
-            }
-        };
-
-        fetchGameDetails();
-    }, [gameId]);
-
-    const BetButton: React.FC<{bet: AvailableBetWithBetType, children: React.ReactNode, customClass?: string }> =
-        ({ bet, children, customClass = '' }) => {
-            const isSelected = selectedBetIds.includes(bet.id);
-            const baseButtonClass = `text-white p-2.5 rounded-md text-xs sm:text-sm text-center transition-all duration-150 ease-in-out shadow-md focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-offset-sleeper-surface w-full `;
-
-            const buttonClasses = isSelected
-                ? 'bg-sleeper-accent hover:bg-opacity-80 ring-2 ring-sleeper-accent transform scale-105'
-                : 'bg-sleeper-primary hover:bg-sleeper-primary-hover focus:ring-sleeper-primary';
-            return (
-                <button
-                    key={bet.id}
-                    onClick={() => onSelectBet(bet, false)}
-                    className={`${baseButtonClass} ${buttonClasses} ${customClass}`}
-                    title={`Select: ${bet.selection_name}`}
-                >
-                    {children}
-                </button>
-            );
-        };
-
-    const renderMarketGroup = (title: string, bets: AvailableBetWithBetType[], showLine: boolean = true, cols: number = 2) => {
-        if (!bets || bets.length === 0) return null;
-        return (
-            <div className="mb-4">
-                <h4 className="text-sm font-semibold text-sleeper-text-secondary mb-2 uppercase tracking-wider">{title}</h4>
-                <div className={`grid grid-cols-1 md:grid-cols-${Math.min(cols, bets.length, 3)} gap-2`}>
-                    {bets.sort((a,b) => a.selection_name.localeCompare(b.selection_name)).map(bet => (
-                        <div key={bet.id}>
-                            <BetButton bet={bet}>
-                                <span className="block truncate font-medium">
-                                    {bet.selection_name}
-                                    {showLine && bet.line !== null && ` (${bet.line > 0 ? `+${bet.line.toFixed(1)}` : bet.line.toFixed(1)})`}
-                                </span>
-                                <span className="block text-lg font-bold">{bet.odds.toFixed(2)}</span>
-                            </BetButton>
-                        </div>
-                    ))}
-                </div>
-            </div>
-        );
+    const handleOddSelect = (odd: AvailableBet) => {
+        if (!isOddInBetSlip(odd.id) && odd.is_active) {
+            addToBetSlip(odd);
+            toast.success(`${odd.selection_name} (${odd.odds.toFixed(2)}) added to slip!`);
+        } else if (!odd.is_active) {
+            toast.warn('This bet is no longer active.');
+        } else {
+            toast.info('This bet is already in your slip.');
+        }
     };
 
-    if (loading) return <div className="p-6 text-center text-sleeper-text-secondary">Loading game details...</div>;
-    if (error) return <div className="p-6 text-center text-sleeper-error">{error}</div>;
-    if (!gameDetail) return <div className="p-6 text-center text-sleeper-text-secondary">Game data not available.</div>;
+    const categorizedOdds = useMemo(() => {
+        if (!oddsData) return {};
 
-    const { mainMarkets, periodMarkets, playerProps, teamProps } = groupBetsByMarketForDetailPage(gameDetail.available_bets, gameDetail.home_team, gameDetail.away_team);
-    const gameDate = new Date(gameDetail.game_time);
+        const categories: Record<string, AvailableBet[]> = {
+            'Game Lines': [],
+            'Team Totals': [],
+            'Passing Props': [],
+            'Rushing Props': [],
+            'Receiving Props': [],
+            'Touchdown Props': [],
+            'Fantasy Score Props': [],
+            'Other Player Props': [],
+            '1st Quarter': [],
+            '2nd Quarter': [],
+            '1st Half': [],
+            '3rd Quarter': [],
+            '4th Quarter': [],
+            '2nd Half': [],
+            'Game Props': [],
+            'Other Bets': [],
+        };
+
+        const categoryOrder = [
+            'Game Lines', 'Team Totals',
+            '1st Quarter', '2nd Quarter', '1st Half',
+            '3rd Quarter', '4th Quarter', '2nd Half',
+            'Passing Props', 'Rushing Props', 'Receiving Props', 'Touchdown Props', 'Fantasy Score Props', 'Other Player Props',
+            'Game Props', 'Other Bets'
+        ];
+
+        oddsData.forEach((odd) => {
+            const betTypeApiMarketKey = odd.bet_type?.api_market_key?.toLowerCase() || 'unknown';
+            let assignedCategory = 'Other Bets';
+
+            if (['h2h', 'spreads', 'totals'].includes(betTypeApiMarketKey)) {
+                assignedCategory = 'Game Lines';
+            } else if (['team_points_home_ou', 'team_points_away_ou'].includes(betTypeApiMarketKey)) {
+                assignedCategory = 'Team Totals';
+            } else if (betTypeApiMarketKey.startsWith('player_')) {
+                if (betTypeApiMarketKey.includes('passing')) assignedCategory = 'Passing Props';
+                else if (betTypeApiMarketKey.includes('rushing')) assignedCategory = 'Rushing Props';
+                else if (betTypeApiMarketKey.includes('receiving')) assignedCategory = 'Receiving Props';
+                else if (betTypeApiMarketKey.includes('touchdown')) assignedCategory = 'Touchdown Props';
+                else if (betTypeApiMarketKey.includes('fantasyscore')) assignedCategory = 'Fantasy Score Props'; // Matched your log
+                else assignedCategory = 'Other Player Props';
+            } else if (betTypeApiMarketKey.startsWith('1q_')) {
+                assignedCategory = '1st Quarter';
+            } else if (betTypeApiMarketKey.startsWith('2q_')) {
+                assignedCategory = '2nd Quarter';
+            } else if (betTypeApiMarketKey.startsWith('1h_')) {
+                assignedCategory = '1st Half';
+            } else if (betTypeApiMarketKey.startsWith('3q_')) {
+                assignedCategory = '3rd Quarter';
+            } else if (betTypeApiMarketKey.startsWith('4q_')) {
+                assignedCategory = '4th Quarter';
+            } else if (betTypeApiMarketKey.startsWith('2h_')) {
+                assignedCategory = '2nd Half';
+            } else if (['game_total_eo', 'team_points_home_eo', 'team_points_away_eo', 'reg_ml3way', 'reg_double_chance'].includes(betTypeApiMarketKey)) {
+                assignedCategory = 'Game Props';
+            }
+
+            if (!categories[assignedCategory]) {
+                categories[assignedCategory] = [];
+            }
+            categories[assignedCategory].push(odd);
+        });
+
+        const orderedCategorizedOdds: Record<string, AvailableBet[]> = {};
+        for (const categoryName of categoryOrder) {
+            if (categories[categoryName] && categories[categoryName].length > 0) {
+                orderedCategorizedOdds[categoryName] = categories[categoryName];
+            }
+        }
+        for (const categoryName in categories) { // Add any stragglers not in predefined order
+            if (categories[categoryName].length > 0 && !orderedCategorizedOdds[categoryName]) {
+                orderedCategorizedOdds[categoryName] = categories[categoryName];
+            }
+        }
+        return orderedCategorizedOdds;
+    }, [oddsData]);
+
+
+    if (loading) return <div className="text-center py-10 text-xl text-sleeper-accent">Loading game details...</div>;
+    if (error) return <div className="text-center py-10 text-xl text-red-500">Error: {error}</div>;
+    if (!game) return <div className="text-center py-10 text-xl">Game not found.</div>;
+
+    const gameDate = new Date(game.game_time);
+    const formattedDate = `${gameDate.toLocaleDateString(undefined, { weekday: 'short', month: 'short', day: 'numeric' })} - ${gameDate.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit', hour12: true })}`;
 
     return (
-        <div className="p-4 sm:p-6 bg-sleeper-surface border border-sleeper-border rounded-xl shadow-xl">
-            <div className="mb-6 pb-4 border-b border-sleeper-border">
-                <RouterLink to="/" className="text-sm text-sleeper-accent hover:underline mb-3 inline-block">← All Games</RouterLink>
-                <h1 className="text-2xl sm:text-3xl font-bold text-sleeper-primary">
-                    {gameDetail.away_team} <span className="text-sleeper-text-secondary text-xl font-normal">@</span> {gameDetail.home_team}
-                </h1>
-                <p className="text-sm text-sleeper-text-secondary mt-1">
-                    {gameDate.toLocaleDateString(undefined, { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' })}
-                    <span className="mx-1.5">·</span>
-                    {gameDate.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: true })}
-                </p>
+        <div className="container mx-auto px-2 sm:px-4 py-6 text-sleeper-text-primary">
+            <Link to="/dashboard/games" className="inline-flex items-center mb-4 text-sleeper-accent hover:text-sleeper-accent-light transition-colors">
+                <ArrowLeftIcon className="h-5 w-5 mr-2" />
+                Back to Games
+            </Link>
+
+            <div className="bg-sleeper-secondary p-4 sm:p-6 rounded-lg shadow-xl mb-6">
+                <div className="flex flex-col sm:flex-row justify-between items-center mb-2">
+                    <h1 className="text-2xl sm:text-3xl font-bold text-sleeper-text-primary truncate">
+                        {game.away_team} @ {game.home_team}
+                    </h1>
+                    <span className="text-sm text-gray-400 mt-1 sm:mt-0">{formattedDate}</span>
+                </div>
+                {game.status === 'completed' && game.home_score !== null && game.away_score !== null && (
+                    <p className="text-xl font-semibold text-sleeper-accent text-center sm:text-right">
+                        Final Score: {game.away_team} {game.away_score} - {game.home_team} {game.home_score}
+                    </p>
+                )}
+                {game.status !== 'completed' && (
+                    <p className="text-md text-gray-400 text-center sm:text-right capitalize">
+                        Status: {game.status}
+                    </p>
+                )}
             </div>
 
-            {gameDetail.available_bets.length > 0 ? (
-                <div className="space-y-6">
-                    {renderMarketGroup("Moneyline", mainMarkets.moneyline, false)}
-                    {renderMarketGroup("Point Spread", mainMarkets.spread, true)}
-                    {renderMarketGroup("Total Points", mainMarkets.total, true)}
-
-                    {Object.entries(periodMarkets).sort(([keyA], [keyB]) => { // Sort periods logically
-                        const order = ['1Q', '1H', '2Q', '3Q', '2H', '4Q'];
-                        return order.indexOf(keyA) - order.indexOf(keyB);
-                    }).map(([period, markets]) => (
-                        (markets.moneyline.length > 0 || markets.spread.length > 0 || markets.total.length > 0 || markets.teamTotals.length > 0 || markets.evenOdd.length > 0) && (
-                            <div key={period}>
-                                <h3 className="text-xl font-semibold text-sleeper-primary mt-6 mb-3 border-b border-sleeper-border pb-1.5">{period} Bets</h3>
-                                <div className="space-y-4">
-                                    {renderMarketGroup(`${period} Moneyline`, markets.moneyline, false)}
-                                    {renderMarketGroup(`${period} Spread`, markets.spread, true)}
-                                    {renderMarketGroup(`${period} Total`, markets.total, true)}
-                                    {renderMarketGroup(`${period} Team Totals`, markets.teamTotals, true)}
-                                    {renderMarketGroup(`${period} Even/Odd`, markets.evenOdd, false)}
-                                </div>
-                            </div>
-                        )
-                    ))}
-
-                    {Object.keys(playerProps).length > 0 && (
-                        <div>
-                            <h3 className="text-xl font-semibold text-sleeper-primary mt-6 mb-3 border-b border-sleeper-border pb-1.5">Player Props</h3>
-                            {Object.entries(playerProps).sort(([aName],[bName]) => aName.localeCompare(bName)).map(([playerName, propsByPlayer]) => (
-                                <div key={playerName} className="mb-4 p-3 bg-sleeper-bg-secondary rounded-lg border border-sleeper-border">
-                                    <h4 className="text-md font-bold text-sleeper-text-primary mb-2">{playerName}</h4>
-                                    <div className="space-y-3">
-                                        {Object.entries(propsByPlayer).sort(([aProp],[bProp]) => aProp.localeCompare(bProp)).map(([propType, bets]) => (
-                                            renderMarketGroup(propType, bets, true, bets.length > 1 ? 2 : 1)
-                                        ))}
-                                    </div>
-                                </div>
-                            ))}
-                        </div>
-                    )}
-
-                    {teamProps.length > 0 && (
-                        <div>
-                            <h3 className="text-xl font-semibold text-sleeper-primary mt-6 mb-3 border-b border-sleeper-border pb-1.5">Other Game Props</h3>
-                            {renderMarketGroup("Game Props", teamProps, true)}
-                        </div>
-                    )}
-                </div>
+            {!oddsData || oddsData.length === 0 ? (
+                <p className="text-center text-lg text-gray-400 py-8">No active odds available for this game at the moment.</p>
             ) : (
-                <p className="text-center text-sleeper-text-secondary py-8">No specific odds currently available for this game. Try the main game list.</p>
+                <div className="space-y-3">
+                    {Object.entries(categorizedOdds).map(([categoryName, oddsList]) => {
+                        const groupedByBetTypeName: Record<string, AvailableBet[]> = oddsList.reduce((acc, odd) => {
+                            const key = odd.bet_type?.name || 'Unknown Bet Type';
+                            if (!acc[key]) acc[key] = [];
+                            acc[key].push(odd);
+                            return acc;
+                        }, {} as Record<string, AvailableBet[]>);
+
+                        return (
+                            <Disclosure key={categoryName} as="div" className="bg-sleeper-secondary rounded-lg shadow" defaultOpen={['Game Lines', 'Team Totals'].includes(categoryName) || oddsList.length < 10}>
+                                {({ open }) => (
+                                    <>
+                                        <Disclosure.Button className="flex justify-between w-full px-4 py-3 text-lg font-medium text-left text-sleeper-primary hover:bg-sleeper-tertiary focus:outline-none focus-visible:ring focus-visible:ring-sleeper-accent focus-visible:ring-opacity-75 rounded-t-lg">
+                                            <span>{categoryName} <span className="text-xs text-gray-400">({oddsList.length} markets)</span></span>
+                                            <ChevronUpIcon className={`${open ? 'transform rotate-180' : ''} w-6 h-6 text-sleeper-accent`} />
+                                        </Disclosure.Button>
+                                        <Disclosure.Panel className="px-2 sm:px-4 pt-3 pb-4 text-sm border-t border-sleeper-border">
+                                            <div className="space-y-4">
+                                                {Object.entries(groupedByBetTypeName).map(([betTypeName, specificOddsList]) => (
+                                                    <div key={betTypeName} className="p-3 bg-sleeper-secondary-alt rounded-md shadow-sm">
+                                                        <h4 className="text-md font-semibold text-sleeper-accent mb-3">{betTypeName}</h4>
+                                                        <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-3">
+                                                            {specificOddsList
+                                                                .sort((a, b) => { // Custom sort: Over before Under, Yes before No, then by line/name
+                                                                    if (a.selection_name.toLowerCase().includes('over') && b.selection_name.toLowerCase().includes('under')) return -1;
+                                                                    if (a.selection_name.toLowerCase().includes('under') && b.selection_name.toLowerCase().includes('over')) return 1;
+                                                                    if (a.selection_name.toLowerCase().includes('yes') && b.selection_name.toLowerCase().includes('no')) return -1;
+                                                                    if (a.selection_name.toLowerCase().includes('no') && b.selection_name.toLowerCase().includes('yes')) return 1;
+                                                                    if (a.line !== null && b.line !== null && a.line !== b.line) return (a.line || 0) - (b.line || 0);
+                                                                    return a.selection_name.localeCompare(b.selection_name);
+                                                                })
+                                                                .map((odd) => (
+                                                                    <button
+                                                                        key={odd.id}
+                                                                        onClick={() => handleOddSelect(odd)}
+                                                                        disabled={isOddInBetSlip(odd.id) || !odd.is_active}
+                                                                        className={`w-full p-3 text-left rounded focus:outline-none transition-colors duration-150 flex justify-between items-center group
+                                                                        ${isOddInBetSlip(odd.id)
+                                                                            ? 'bg-sleeper-accent-dark text-white cursor-not-allowed'
+                                                                            : odd.is_active
+                                                                                ? 'bg-sleeper-tertiary hover:bg-sleeper-accent text-sleeper-text-primary focus:ring-2 focus:ring-sleeper-accent-light'
+                                                                                : 'bg-gray-700 text-gray-500 cursor-not-allowed opacity-60'
+                                                                        }`}
+                                                                    >
+                                                                        <span className="block text-sm font-medium truncate group-hover:text-white">{odd.selection_name}</span>
+                                                                        <span className={`block text-lg font-bold ${isOddInBetSlip(odd.id) ? 'text-white' : odd.is_active ? 'text-sleeper-accent-light group-hover:text-white' : 'text-gray-500'}`}>
+                                                                        {odd.odds.toFixed(2)}
+                                                                    </span>
+                                                                    </button>
+                                                                ))}
+                                                        </div>
+                                                    </div>
+                                                ))}
+                                            </div>
+                                        </Disclosure.Panel>
+                                    </>
+                                )}
+                            </Disclosure>
+                        );
+                    })}
+                </div>
             )}
         </div>
     );
-};
+}
 
 export default GameDetailPage;

@@ -1,387 +1,297 @@
-// supabase/functions/fetch-sports-data/index.ts
+// File: supabase/functions/fetch-sports-data/index.ts
+
 import { serve } from 'https://deno.land/std@0.177.0/http/server.ts';
-import { createClient, SupabaseClient } from 'https://esm.sh/@supabase/supabase-js@2';
+import { createClient, SupabaseClient } from 'https://esm.sh/@supabase/supabase-js@2.43.4';
 import { corsHeaders } from '../_shared/cors.ts';
 
-// --- Type Definitions (Remain the same) ---
-interface ApiEventTeamDetails { statEntityID: string; score?: number; names: { short: string; medium: string; long: string }; teamID: string; }
-interface ApiEventTeams { home: ApiEventTeamDetails; away: ApiEventTeamDetails; }
-interface ApiEventStatus { startsAt: string; started: boolean; completed: boolean; cancelled: boolean; finalized: boolean; live: boolean; displayShort?: string; displayLong?: string; }
-interface ApiBookmakerOddDetail { /* Not directly used if we only use fair odds, but keep for type completeness */
-  bookmakerID: string; odds: string; overUnder?: string; spread?: string; available: boolean; isMainLine?: boolean; lastUpdatedAt: string;
-}
-interface ApiOddData {
-  oddID: string; opposingOddID?: string; marketName: string; statID: string; statEntityID: string;
-  periodID: string; betTypeID: string; sideID?: string; playerID?: string;
-  byBookmaker?: Record<string, ApiBookmakerOddDetail>; // Still part of API response structure
-  fairOdds?: string; fairOverUnder?: string; fairSpread?: string;
-  bookOdds?: string; bookOverUnder?: string; bookSpread?: string; // Top-level consensus bookie odds
-}
-interface ApiEventResultsPeriod { [statEntityID: string]: { [statID: string]: number | string; }; }
-interface ApiEventResults { [periodID: string]: ApiEventResultsPeriod; }
-interface ApiPlayer {
-  playerID: string; name: string; teamID: string; alias?: string;
-  firstName?: string; lastName?: string; nickname?: string; position?: string;
-}
-interface ApiEvent {
-  eventID: string; sportID: string; leagueID?: string; type: "match" | "prop" | "tournament";
-  info?: Record<string, any>; players?: Record<string, ApiPlayer>; teams: ApiEventTeams;
-  status: ApiEventStatus; odds?: Record<string, ApiOddData>; results?: ApiEventResults;
-}
-interface BetType { id: number; name: string; api_market_key: string; }
+console.log('[Info] fetch-sports-data function booting up (V2 API - NFL Focus - v4.5.4 - Robust bookmakerID check)');
 
-console.log('fetch-sports-data function booting up (V2 API - NFL Focus - v4.3 - Fair Odds Only)');
-
-function americanToDecimal(americanOdds: number): number | null {
-  if (isNaN(americanOdds)) return null;
-  if (americanOdds > 0) return (americanOdds / 100) + 1;
-  if (americanOdds < 0) return (100 / Math.abs(americanOdds)) + 1;
-  return null;
+// Interface definitions (ensure these are complete based on API and your needs)
+interface StatusObject {
+  hardStart?: boolean; delayed?: boolean; cancelled?: boolean; startsAt?: string;
+  started?: boolean; displayShort?: string; completed?: boolean; displayLong?: string;
+  ended?: boolean; live?: boolean; finalized?: boolean; currentPeriodID?: string;
+  previousPeriodID?: string; oddsPresent?: boolean; oddsAvailable?: boolean;
 }
 
-function formatStatNameForDisplay(statID: string): string {
-  const nameMap: Record<string, string> = {
-    'points': 'Points', 'passing_yards': 'Passing Yds', 'rushing_yards': 'Rushing Yds',
-    'receiving_yards': 'Receiving Yds', 'touchdowns': 'Anytime TD', 'defense_sacks': 'Sacks',
-    'passing_touchdowns': 'Passing TDs', 'rushing_touchdowns': 'Rushing TDs', 'receiving_touchdowns': 'Receiving TDs',
-    'receiving_receptions': 'Receptions',
-    'passing_interceptions': 'INTs Thrown (QB)',
-    'defense_interceptions': 'INTs Made (Defense)',
-    'passing_completions': 'Pass Completions', 'passing_attempts': 'Pass Attempts',
-    'passing_longestCompletion': 'Longest Completion', 'rushing_longestRush': 'Longest Rush',
-    'receiving_longestReception': 'Longest Reception', 'defense_combinedTackles': 'Combined Tackles',
-    'kicking_totalPoints': 'Kicker Pts', 'fieldGoals_made': 'FGs Made',
-    'extraPoints_kicksMade': 'XPs Made', 'rushing+receiving_yards': 'Rush+Rec Yds',
-    'passing+rushing_yards': 'Pass+Rush Yds',
-    'firstTouchdown': 'First TD', 'lastTouchdown': 'Last TD', 'rushing_attempts': 'Rushing Attempts',
-  };
-  return nameMap[statID] || statID.replace(/([A-Z])/g, ' $1').replace(/^./, str => str.toUpperCase());
+interface OddData {
+  oddID_key: string; sportID: string; leagueID: string; eventID: string; bookmakerID?: string; // Made bookmakerID optional
+  periodID: string; statEntityID: string; betTypeID: string; sideID: string;
+  odds: string; line?: string; lastUpdate: string; playerID?: string;
+  marketName?: string; statID?: string; opposingOddID?: string;
+  fairOdds?: string; bookOdds?: string; fairOverUnder?: string; bookOverUnder?: string;
+  score?: number; scoringSupported?: boolean;
 }
 
-serve(async (req: Request) => {
-  if (req.method === 'OPTIONS') { return new Response('ok', { headers: corsHeaders }); }
+interface EventData {
+  eventID: string; sportID: string; leagueID: string;
+  startsAt: string; status: StatusObject;
+  homeTeamName?: string; awayTeamName?: string;
+  teams?: { home: { name: string; teamID: string; }; away: { name: string; teamID: string; }; };
+  odds: Record<string, OddData>;
+  lastUpdate: string;
+}
+
+interface V2ApiResponseDataField {
+  events?: EventData[];
+  nextCursor?: string;
+}
+
+interface V2ApiResponse {
+  success: boolean; message?: string;
+  data?: EventData[] | V2ApiResponseDataField;
+  error?: string;
+}
+
+interface BetTypeRecord { id: number; name: string; api_market_key: string; description?: string; }
+
+function getSupabaseAdminClient(): SupabaseClient {
+  const supabaseUrl = Deno.env.get('APP_SUPABASE_URL');
+  const supabaseServiceRoleKey = Deno.env.get('APP_SUPABASE_SERVICE_ROLE_KEY');
+  if (!supabaseUrl || !supabaseServiceRoleKey) {
+    console.error('[Error_Critical] APP_SUPABASE_URL or APP_SUPABASE_SERVICE_ROLE_KEY is missing. Check supabase/.env.');
+    throw new Error('Missing critical APP_SUPABASE_URL or APP_SUPABASE_SERVICE_ROLE_KEY for Supabase admin client.');
+  }
+  return createClient(supabaseUrl, supabaseServiceRoleKey, {
+    auth: { persistSession: false, autoRefreshToken: false, detectSessionInUrl: false },
+  });
+}
+
+serve(async (_req) => {
+  if (_req.method === 'OPTIONS') { return new Response('ok', { headers: corsHeaders }); }
+
   try {
+    const supabaseAdmin = getSupabaseAdminClient();
+    console.log('[Info] Supabase admin client initialized.');
+
+    const { data: betTypesData, error: betTypesError } = await supabaseAdmin
+        .from('bet_types')
+        .select('id, name, api_market_key, description');
+    if (betTypesError) { console.error('[Error_DB] Error fetching bet types:', betTypesError); throw betTypesError; }
+
+    const betTypeMapping = new Map<string, BetTypeRecord>();
+    betTypesData?.forEach(bt => betTypeMapping.set(bt.api_market_key, bt as BetTypeRecord));
+    console.log(`[Info] Bet types fetched and mapped (count): ${betTypeMapping.size}`);
+
     const SPORTS_GAME_ODDS_API_KEY = Deno.env.get('SPORTS_GAME_ODDS_API_KEY');
-    const SUPABASE_SERVICE_ROLE_KEY = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY');
-    const supabaseUrl = Deno.env.get('SUPABASE_URL');
-
-    if (!SPORTS_GAME_ODDS_API_KEY || !SUPABASE_SERVICE_ROLE_KEY || !supabaseUrl) {
-      throw new Error('Missing critical environment variables/secrets');
-    }
-    const supabaseAdmin: SupabaseClient = createClient(supabaseUrl, SUPABASE_SERVICE_ROLE_KEY);
-    console.log('Supabase admin client initialized.');
-
-    const { data: betTypesFromDB, error: betTypesError } = await supabaseAdmin.from('bet_types').select('id, api_market_key, name');
-    if (betTypesError) throw betTypesError;
-    if (!betTypesFromDB || betTypesFromDB.length === 0) throw new Error('No bet types found in DB. Please ensure bet_types table is populated.');
-
-    const betTypeMapping = new Map<string, BetType>();
-    betTypesFromDB.forEach(bt => betTypeMapping.set(bt.api_market_key, bt as BetType));
-    console.log(`Bet types fetched and mapped (count): ${betTypeMapping.size}`);
+    if (!SPORTS_GAME_ODDS_API_KEY) { console.error('[Error_Critical] SPORTS_GAME_ODDS_API_KEY env var not set.'); throw new Error('SPORTS_GAME_ODDS_API_KEY env var not set.'); }
 
     const sportIdentifierForAPI = 'FOOTBALL';
     const leagueIdentifierForAPI = 'NFL';
-    // bookmakerID might still be required by API, even if we don't use its specific odds
-    const bookmakerIDForAPIQuery = 'draftkings';
-    const commonHeaders = { 'x-api-key': SPORTS_GAME_ODDS_API_KEY };
-    const processingStats = {
-      eventsReceived: 0, gamesUpserted: 0, oddsProcessed: 0, playerPropsProcessed: 0,
-      mainMarketsProcessed: 0, periodMarketsProcessed: 0, teamPropsProcessed: 0,
-      oddsEventsFailed: 0, availableBetsInserted: 0, timeBasedStatusUpdates: 0,
-      oddsSkippedNoFairOdds: 0
-    };
+    const bookmakerForFairOdds = 'draftkings'; // Target bookmaker
 
     const eventParams = new URLSearchParams({
-      sportID: sportIdentifierForAPI,
-      leagueID: leagueIdentifierForAPI,
-      bookmakerID: bookmakerIDForAPIQuery,
-      limit: "10"
+      sportID: sportIdentifierForAPI, leagueID: leagueIdentifierForAPI,
+      bookmakerID: bookmakerForFairOdds, // Still request for this bookmaker
+      limit: "10",
     });
 
-    const testStartsAfter = '2024-10-01T00:00:00Z';
-    const testStartsBefore = '2024-10-07T00:00:00Z';
-    eventParams.set('startsAfter', testStartsAfter);
-    eventParams.set('startsBefore', testStartsBefore);
-    console.log(`--- TESTING WITH USER-PROVIDED DATES (Oct 2024 Range) ---`);
+    const queryStartsAfter = '2024-10-01T00:00:00Z';
+    const queryStartsBefore = '2024-10-08T23:59:59Z';
 
-    console.log(`Fetching ${leagueIdentifierForAPI} events between: ${eventParams.get('startsAfter')} and ${eventParams.get('startsBefore')} with limit ${eventParams.get('limit')}`);
+    eventParams.set('startsAfter', queryStartsAfter);
+    eventParams.set('startsBefore', queryStartsBefore);
+    console.log(`[Info] --- Querying ${leagueIdentifierForAPI} events between: ${queryStartsAfter} and ${queryStartsBefore} with limit ${eventParams.get('limit')} ---`);
+
     const eventsApiUrl = `https://api.sportsgameodds.com/v2/events/?${eventParams.toString()}`;
-    console.log(`Fetching events from V2 API: ${eventsApiUrl}`);
+    console.log(`[Info] Fetching events from V2 API: ${eventsApiUrl}`);
+    console.log(`[DEBUG] Using API Key: "${SPORTS_GAME_ODDS_API_KEY}"`);
 
-    let apiEventsData: { success?: boolean; data?: ApiEvent[]; error?: string } = {};
-    // ... (API fetch logic - same as before) ...
-    try {
-      const eventsResponse = await fetch(eventsApiUrl, { headers: commonHeaders });
-      console.log(`V2 Events API response status: ${eventsResponse.status}`);
-      const responseText = await eventsResponse.text();
-      if (!eventsResponse.ok) {
-        let errorDetail = responseText; try { const p = JSON.parse(responseText); if (p.error) errorDetail = p.error; else if (p.message) errorDetail = p.message; } catch (e) { }
-        console.error(`SportsGameOdds V2 API (events) error: ${eventsResponse.status}`, errorDetail);
-        processingStats.oddsEventsFailed = -1; apiEventsData.data = [];
-      } else {
-        apiEventsData = JSON.parse(responseText);
-        if (!apiEventsData.success || !Array.isArray(apiEventsData.data)) {
-          console.warn("V2 Events API response not successful or data not array. Response:", apiEventsData);
-          apiEventsData.data = [];
-        }
-      }
-    } catch (e) {
-      console.error("Network/parsing error fetching events:", e.message);
-      processingStats.oddsEventsFailed = -2; apiEventsData.data = [];
+    const eventsResponse = await fetch(eventsApiUrl, {
+      method: 'GET', headers: { 'X-Api-Key': SPORTS_GAME_ODDS_API_KEY },
+    });
+
+    console.log(`[Info] V2 Events API response status: ${eventsResponse.status}`);
+    if (!eventsResponse.ok) {
+      const errorBody = await eventsResponse.text();
+      console.error(`[Error_API] API Error: ${eventsResponse.status} ${eventsResponse.statusText} - Body: ${errorBody}`);
+      throw new Error(`Failed to fetch events from V2 API: ${eventsResponse.statusText} - ${errorBody}`);
     }
-    const receivedEvents = apiEventsData.data || [];
-    processingStats.eventsReceived = receivedEvents.length;
-    console.log(`Received ${receivedEvents.length} NFL event(s) from V2 API.`);
 
+    const eventsResult = (await eventsResponse.json()) as V2ApiResponse;
+    let fetchedEvents: EventData[] = [];
 
-    for (const apiEvent of receivedEvents) {
-      // ... (game upsert logic - same as before, ensure api_results_data is included) ...
-      if (apiEvent.type !== 'match' || !apiEvent.teams?.home?.names || !apiEvent.teams?.away?.names) {
-        console.warn(`Skipping event ${apiEvent.eventID || 'N/A'} - not a match or missing team names.`);
-        continue;
-      }
-      try {
-        const homeTeamName = apiEvent.teams.home.names.long || apiEvent.teams.home.names.medium || apiEvent.teams.home.teamID;
-        const awayTeamName = apiEvent.teams.away.names.long || apiEvent.teams.away.names.medium || apiEvent.teams.away.teamID;
+    if (eventsResult.success && eventsResult.data) {
+      if (Array.isArray(eventsResult.data)) { fetchedEvents = eventsResult.data; }
+      else if (eventsResult.data.events && Array.isArray(eventsResult.data.events)) { fetchedEvents = eventsResult.data.events; }
+      if (!Array.isArray(eventsResult.data) && eventsResult.data.nextCursor) { console.log(`[Info] API response includes nextCursor: ${eventsResult.data.nextCursor}`); }
+    } else if (!eventsResult.success) {
+      console.error('[Error_API_Structure] API call indicates failure. Full Response:', JSON.stringify(eventsResult, null, 2));
+      throw new Error(eventsResult.message || eventsResult.error || 'API returned success=false.');
+    }
 
-        const gameStatus = apiEvent.status.live ? 'live' : (apiEvent.status.completed ? 'completed' : 'scheduled');
-        const homeScoreRaw = apiEvent.results?.[apiEvent.status.completed ? 'game' : 'live']?.home?.points;
-        const awayScoreRaw = apiEvent.results?.[apiEvent.status.completed ? 'game' : 'live']?.away?.points;
-        const homeScore = homeScoreRaw !== undefined ? parseInt(homeScoreRaw.toString(), 10) : null;
-        const awayScore = awayScoreRaw !== undefined ? parseInt(awayScoreRaw.toString(), 10) : null;
+    console.log(`[Info] Received ${fetchedEvents.length} ${leagueIdentifierForAPI} event(s) from V2 API.`);
+    if (fetchedEvents.length === 0) {
+      console.log('[Info] No events returned from API for the specified parameters. Function will complete without processing games/odds.');
+    }
 
-        const { data: game, error: gameUpsertError } = await supabaseAdmin
-            .from('games').upsert({
-              api_game_id: apiEvent.eventID, home_team: homeTeamName, away_team: awayTeamName,
-              game_time: apiEvent.status.startsAt, status: gameStatus,
-              home_score: (homeScore !== null && !isNaN(homeScore)) ? homeScore : null,
-              away_score: (awayScore !== null && !isNaN(awayScore)) ? awayScore : null,
-              last_odds_update: apiEvent.odds && Object.keys(apiEvent.odds).length > 0 ? new Date().toISOString() : null,
-              last_score_update: apiEvent.results ? new Date().toISOString() : null,
-              api_results_data: apiEvent.results || null,
-            }, { onConflict: 'api_game_id' }).select('id').single();
+    let gamesUpserted = 0;
+    let availableBetsInserted = 0;
+    const processingStats = { /* ... as before ... */
+      mainMarketsProcessed: 0, periodMarketsProcessed: 0, playerMarketsProcessed: 0,
+      unknownOddFormatSkipped: 0, noBetTypeMappingSkipped: 0,
+      emptySelectionNameSkipped: 0, noOddsValueSkipped: 0,
+    };
 
-        if (gameUpsertError || !game) {
-          console.error(`Error upserting game ${apiEvent.eventID} or no game data returned:`, gameUpsertError?.message);
-          processingStats.oddsEventsFailed++; continue;
-        }
-        processingStats.gamesUpserted++;
-        const internalGameId = game.id;
+    for (const event of fetchedEvents) {
+      let gameStatus = 'unknown';
+      if (event.status && typeof event.status.displayLong === 'string') { gameStatus = event.status.displayLong.toLowerCase(); }
+      else if (event.status && typeof event.status.displayShort === 'string') { gameStatus = event.status.displayShort.toLowerCase(); }
 
-        if (apiEvent.odds && Object.keys(apiEvent.odds).length > 0) {
-          await supabaseAdmin.from('available_bets').update({ is_active: false }).eq('game_id', internalGameId).eq('is_active', true);
-          const newAvailableBetsToInsert = [];
-          const playersMap = apiEvent.players || {};
+      const eventHomeTeamName = event.teams?.home?.name || event.homeTeamName || 'Unknown Home';
+      const eventAwayTeamName = event.teams?.away?.name || event.awayTeamName || 'Unknown Away';
+      console.log(`[Info_Event] Processing event: ${event.eventID} (${eventAwayTeamName} vs ${eventHomeTeamName}), API Status: ${gameStatus}`);
 
-          for (const oddID_key in apiEvent.odds) {
-            processingStats.oddsProcessed++;
-            const oddData = apiEvent.odds[oddID_key];
+      const { data: gameData, error: gameError } = await supabaseAdmin
+          .from('games')
+          .upsert({
+            api_game_id: event.eventID, home_team: eventHomeTeamName, away_team: eventAwayTeamName,
+            game_time: event.startsAt || event.status?.startsAt || new Date(0).toISOString(),
+            status: gameStatus, last_odds_update: new Date().toISOString(),
+          }, { onConflict: 'api_game_id' })
+          .select('id, home_team, away_team').single();
 
-            // --- Use Fair Odds or top-level Book Odds as primary source ---
-            const currentOddsValue = oddData.fairOdds || oddData.bookOdds;
-            const currentOverUnder = oddData.fairOverUnder || oddData.bookOverUnder;
-            const currentSpread = oddData.fairSpread || oddData.bookSpread;
+      if (gameError) { console.error(`[Error_DB_GameUpsert] for game ${event.eventID}:`, gameError); continue; }
+      if (!gameData) { console.error(`[Error_DB_GameUpsertReturn] No data for game ${event.eventID}.`); continue; }
 
-            if (!currentOddsValue) { // If no fairOdds or top-level bookOdds string, skip
-              console.log(`[DEBUG V4.3] Skipping ${oddID_key} - no fairOdds or bookOdds string available.`);
-              processingStats.oddsSkippedNoFairOdds++;
-              continue;
-            }
+      gamesUpserted++;
+      const currentGameId = gameData.id;
+      const confirmedHomeTeamName = gameData.home_team;
+      const confirmedAwayTeamName = gameData.away_team;
+      const availableBetsToInsert = [];
 
-            let mappedBetType: BetType | undefined = undefined;
-            let selectionName = "";
-            let line: number | null = null;
-            let internalMarketKey = "";
+      if (event.odds && typeof event.odds === 'object' && !Array.isArray(event.odds)) {
+        for (const oddData of Object.values(event.odds as Record<string, OddData>)) {
+          // ---- ADDED CHECK FOR oddData.bookmakerID before toLowerCase() ----
+          if (!oddData.bookmakerID || typeof oddData.bookmakerID !== 'string' || oddData.bookmakerID.toLowerCase() !== bookmakerForFairOdds.toLowerCase()) {
+            // console.log(`[DEBUG_BookmakerSkip] Skipping odd ${oddData.oddID_key} - bookmaker: ${oddData.bookmakerID}`);
+            continue;
+          }
+          // ---- END OF ADDED CHECK ----
 
-            // --- Player Props ---
-            if (oddData.playerID && oddData.statEntityID === oddData.playerID && playersMap[oddData.playerID]) {
-              const player = playersMap[oddData.playerID];
-              const playerName = player.name || `${player.firstName} ${player.lastName}` || `Player ${oddData.playerID}`;
-              const statDisplayName = formatStatNameForDisplay(oddData.statID);
+          if (!oddData.odds || oddData.odds.trim() === "") { processingStats.noOddsValueSkipped++; continue; }
+          try { parseFloat(oddData.odds); } catch (e) { processingStats.noOddsValueSkipped++; continue; }
 
-              if (oddData.statID === 'points' && (player.position === 'K' || playerName.toLowerCase().includes('kicker'))) {
-                internalMarketKey = `player_kicking_totalPoints_${oddData.betTypeID}`;
-              } else {
-                internalMarketKey = `player_${oddData.statID}_${oddData.betTypeID}`;
-              }
+          let internalMarketKey: string | undefined = undefined;
+          let selectionName: string | undefined = undefined;
+          let mappedBetType: BetTypeRecord | undefined = undefined;
+          let lineValue: number | undefined = oddData.line ? parseFloat(oddData.line) : undefined;
+
+          // Player Props
+          if (oddData.statEntityID && oddData.statEntityID.toLowerCase() !== 'home' && oddData.statEntityID.toLowerCase() !== 'away' && oddData.statEntityID.toLowerCase() !== 'all') {
+            const parts = oddData.oddID_key.split('-');
+            if (parts.length >= 4) {
+              const stat = parts[0]; const betTypeAbbr = parts[parts.length - 2];
+              internalMarketKey = `player_${stat}_${betTypeAbbr}`;
               mappedBetType = betTypeMapping.get(internalMarketKey);
-
               if (mappedBetType) {
-                if (oddData.betTypeID === 'ou' && currentOverUnder) {
-                  line = parseFloat(currentOverUnder);
-                  selectionName = `${playerName} ${statDisplayName} ${oddData.sideID === 'over' ? 'Over' : 'Under'} ${line.toFixed(1)}`;
-                } else if (oddData.betTypeID === 'yn') {
-                  selectionName = `${playerName} ${statDisplayName} ${oddData.sideID === 'yes' ? 'Yes' : 'No'}`;
-                } else {
-                  console.warn(`[Player Prop DEBUG] Unclear naming for ${playerName}, stat: ${oddData.statID}, betType: ${oddData.betTypeID}, oddID: ${oddID_key}`);
-                  continue;
-                }
-                processingStats.playerPropsProcessed++;
+                const playerNameForDisplay = oddData.playerID?.split('_').slice(0, -2).join(' ').replace(/_/g, ' ') || oddData.statEntityID.split('_').slice(0, -2).join(' ').replace(/_/g, ' ');
+                if (betTypeAbbr === 'ou' && lineValue !== undefined) {
+                  selectionName = `${playerNameForDisplay} ${mappedBetType.name.replace('Player ', '').replace(' O/U','')} ${oddData.sideID === 'over' ? 'Over' : 'Under'} ${lineValue}`;
+                } else if (betTypeAbbr === 'yn') {
+                  selectionName = `${playerNameForDisplay} ${mappedBetType.name.replace('Player ', '').replace(' Yes/No','')} ${oddData.sideID === 'yes' ? 'Yes' : 'No'}`;
+                } else { selectionName = `${playerNameForDisplay} ${mappedBetType.name.replace('Player ', '')} - ${oddData.sideID}`; }
+                processingStats.playerMarketsProcessed++;
               }
-            }
-            // --- Team & Game Period Props ---
-            else if (oddData.periodID && !['game', 'reg'].includes(oddData.periodID) && (oddData.statEntityID === 'home' || oddData.statEntityID === 'away' || oddData.statEntityID === 'all')) {
-              const periodKeyPart = oddData.periodID;
-              if (oddData.statEntityID === 'home' || oddData.statEntityID === 'away') {
-                if (oddData.betTypeID === 'ou') {
-                  internalMarketKey = `${periodKeyPart}_team_points_${oddData.statEntityID}_ou`;
-                } else if (oddData.betTypeID === 'ml') {
-                  internalMarketKey = `${periodKeyPart}_ml`;
-                } else if (oddData.betTypeID === 'sp'){
-                  internalMarketKey = `${periodKeyPart}_sp`;
-                } else if (oddData.betTypeID === 'eo') {
-                  internalMarketKey = `${periodKeyPart}_team_points_${oddData.statEntityID}_eo`;
-                }
-              } else if (oddData.statEntityID === 'all') {
-                if (oddData.betTypeID === 'ou') {
-                  internalMarketKey = `${periodKeyPart}_totals_ou`;
-                } else if (oddData.betTypeID === 'eo') {
-                  internalMarketKey = `${periodKeyPart}_total_eo`;
-                }
-              }
-              mappedBetType = betTypeMapping.get(internalMarketKey);
-              if(mappedBetType) {
-                const periodName = periodKeyPart.toUpperCase();
-                if (oddData.betTypeID === 'ou' && currentOverUnder) {
-                  line = parseFloat(currentOverUnder);
-                  const teamTarget = (oddData.statEntityID === 'home' || oddData.statEntityID === 'away') ?
-                      (oddData.statEntityID === 'home' ? homeTeamName : awayTeamName) + " Pts" : "Total Pts";
-                  selectionName = `${periodName} ${teamTarget} ${oddData.sideID === 'over' ? 'O' : 'U'} ${line.toFixed(1)}`;
-                } else if (oddData.betTypeID === 'ml' && (oddData.statEntityID === 'home' || oddData.statEntityID === 'away')) {
-                  selectionName = `${periodName} ${oddData.statEntityID === 'home' ? homeTeamName : awayTeamName}`;
-                } else if (oddData.betTypeID === 'sp' && currentSpread && (oddData.statEntityID === 'home' || oddData.statEntityID === 'away')) {
-                  line = parseFloat(currentSpread);
-                  selectionName = `${periodName} ${oddData.statEntityID === 'home' ? homeTeamName : awayTeamName} ${line > 0 ? '+' : ''}${line.toFixed(1)}`;
-                } else if (oddData.betTypeID === 'eo') {
-                  const teamTarget = (oddData.statEntityID === 'home' || oddData.statEntityID === 'away') ?
-                      (oddData.statEntityID === 'home' ? homeTeamName : awayTeamName) + " Pts" : "Total Pts";
-                  selectionName = `${periodName} ${teamTarget} ${oddData.sideID === 'even' ? 'Even' : 'Odd'}`;
-                }
-                if (oddData.statEntityID === 'home' || oddData.statEntityID === 'away') processingStats.teamPropsProcessed++;
-                else processingStats.periodMarketsProcessed++;
-              }
-            }
-            // --- Main Game Markets ---
-            else if (oddData.periodID === 'game' || oddData.periodID === 'reg') {
-              if (oddData.betTypeID === 'ml' && (oddData.statEntityID === 'home' || oddData.statEntityID === 'away')) {
-                internalMarketKey = 'h2h';
-              } else if (oddData.betTypeID === 'sp' && (oddData.statEntityID === 'home' || oddData.statEntityID === 'away')) {
-                internalMarketKey = 'spreads';
-              } else if (oddData.betTypeID === 'ou' && oddData.statEntityID === 'all') {
-                internalMarketKey = 'totals';
-              } else if (oddData.betTypeID === 'ou' && (oddData.statEntityID === 'home' || oddData.statEntityID === 'away')) {
-                internalMarketKey = `team_points_${oddData.statEntityID}_ou`;
-              } else if (oddData.betTypeID === 'eo' && oddData.statEntityID === 'all') {
-                internalMarketKey = 'game_total_eo';
-              } else if (oddData.betTypeID === 'eo' && (oddData.statEntityID === 'home' || oddData.statEntityID === 'away')) {
-                internalMarketKey = `team_points_${oddData.statEntityID}_eo`;
-              } else if (oddData.betTypeID === 'ml3way' && oddData.periodID === 'reg') {
-                internalMarketKey = 'reg_ml3way';
-              }
-
-              mappedBetType = betTypeMapping.get(internalMarketKey);
-              if(mappedBetType) {
-                if (internalMarketKey === 'h2h') {
-                  if (oddData.statEntityID === 'home') selectionName = homeTeamName;
-                  else if (oddData.statEntityID === 'away') selectionName = awayTeamName;
-                } else if (internalMarketKey === 'spreads' && currentSpread) {
-                  line = parseFloat(currentSpread);
-                  if (oddData.statEntityID === 'home') selectionName = `${homeTeamName} ${line > 0 ? '+' : ''}${line.toFixed(1)}`;
-                  else if (oddData.statEntityID === 'away') selectionName = `${awayTeamName} ${line > 0 ? '+' : ''}${line.toFixed(1)}`;
-                } else if (internalMarketKey === 'totals' && currentOverUnder) {
-                  line = parseFloat(currentOverUnder);
-                  selectionName = `Total ${oddData.sideID === 'over' ? 'Over' : 'Under'} ${line.toFixed(1)}`;
-                } else if (internalMarketKey === `team_points_home_ou` || internalMarketKey === `team_points_away_ou`) {
-                  if (currentOverUnder) {
-                    line = parseFloat(currentOverUnder);
-                    selectionName = `${oddData.statEntityID === 'home' ? homeTeamName : awayTeamName} Pts ${oddData.sideID === 'over' ? 'O' : 'U'} ${line.toFixed(1)}`;
-                  }
-                } else if (internalMarketKey === 'game_total_eo') {
-                  selectionName = `Total Points ${oddData.sideID === 'even' ? 'Even' : 'Odd'}`;
-                } else if (internalMarketKey === `team_points_home_eo` || internalMarketKey === `team_points_away_eo`) {
-                  selectionName = `${oddData.statEntityID === 'home' ? homeTeamName : awayTeamName} Points ${oddData.sideID === 'even' ? 'Even' : 'Odd'}`;
-                } else if (internalMarketKey === 'reg_ml3way') {
-                  if (oddData.sideID === 'home') selectionName = `${homeTeamName} (3-Way)`;
-                  else if (oddData.sideID === 'away') selectionName = `${awayTeamName} (3-Way)`;
-                  else if (oddData.sideID === 'draw') selectionName = 'Draw (3-Way)';
-                  // Note: 'home+draw' or 'away+draw' as sideID for ml3way is unusual.
-                  // If API uses this, it's more like a "Double Chance" market, which would need its own bet_type.
-                  // For now, only handling explicit home/away/draw sides for ml3way.
-                }
-                processingStats.mainMarketsProcessed++;
-              }
-            }
-
-            if (!mappedBetType) {
-              console.log(`[DEBUG V4.3] No BetType mapping for internalMarketKey: '${internalMarketKey}' (API oddID_key: ${oddID_key}, Details: S:${oddData.statID}, BT:${oddData.betTypeID}, P:${oddData.periodID}, E:${oddData.statEntityID}, Side:${oddData.sideID})`);
-              continue;
-            }
-            if (!selectionName && mappedBetType) {
-              console.warn(`[DEBUG V4.3] SelectionName is empty for mappedBetType '${mappedBetType.name}' from oddID_key: ${oddID_key}. This indicates a logic gap for this combination.`);
-              continue;
-            }
-
-            const americanOddsVal = parseFloat(currentOddsValue); // Use currentOddsValue
-            const decimalPrice = americanToDecimal(americanOddsVal);
-
-            if (decimalPrice !== null) {
-              newAvailableBetsToInsert.push({
-                game_id: internalGameId,
-                bet_type_id: mappedBetType.id,
-                selection_name: selectionName,
-                odds: parseFloat(decimalPrice.toFixed(2)),
-                line: line !== null && !isNaN(line) ? line : null,
-                is_active: true,
-                source_bookmaker: "fair_market_value", // Indicate using fair/consensus odds
-                api_last_update: new Date().toISOString(), // Using current time as last update for these
-              });
-            } else {
-              console.warn(`[DEBUG V4.3] Could not convert American odds: '${currentOddsValue}' (type: ${typeof currentOddsValue}) for ${oddID_key}`);
             }
           }
-
-          if (newAvailableBetsToInsert.length > 0) {
-            const { error: insertError, count } = await supabaseAdmin.from('available_bets').insert(newAvailableBetsToInsert).select('*', { count: 'exact' });
-            if (insertError) {
-              console.error(`Error inserting available_bets for game ${internalGameId} (${apiEvent.eventID}):`, insertError.message);
-            } else {
-              console.log(`Inserted ${count || 0} new available_bets for game ${internalGameId} (${apiEvent.eventID}). Using fair/consensus odds.`);
-              processingStats.availableBetsInserted += (count || 0);
+          // Period Specific Markets
+          else if (['1h', '2h', '1q', '2q', '3q', '4q'].includes(oddData.periodID)) {
+            const periodPrefix = oddData.periodID;
+            if (oddData.betTypeID === 'ml') internalMarketKey = `${periodPrefix}_ml`;
+            else if (oddData.betTypeID === 'sp') internalMarketKey = `${periodPrefix}_sp`;
+            else if (oddData.betTypeID === 'ou' && oddData.statEntityID === 'all') internalMarketKey = `${periodPrefix}_totals_ou`;
+            else if (oddData.betTypeID === 'ou' && oddData.statEntityID === 'home') internalMarketKey = `${periodPrefix}_team_points_home_ou`;
+            else if (oddData.betTypeID === 'ou' && oddData.statEntityID === 'away') internalMarketKey = `${periodPrefix}_team_points_away_ou`;
+            else if (oddData.betTypeID === 'eo' && oddData.statEntityID === 'all') internalMarketKey = `${periodPrefix}_total_eo`;
+            else if (oddData.betTypeID === 'eo' && oddData.statEntityID === 'home') internalMarketKey = `${periodPrefix}_team_points_home_eo`;
+            else if (oddData.betTypeID === 'eo' && oddData.statEntityID === 'away') internalMarketKey = `${periodPrefix}_team_points_away_eo`;
+            mappedBetType = betTypeMapping.get(internalMarketKey || '');
+            if(mappedBetType && internalMarketKey) {
+              if (internalMarketKey.endsWith('_ml')) selectionName = oddData.statEntityID === 'home' ? confirmedHomeTeamName : confirmedAwayTeamName;
+              else if (internalMarketKey.endsWith('_sp')) selectionName = `${oddData.statEntityID === 'home' ? confirmedHomeTeamName : confirmedAwayTeamName} ${lineValue !== undefined && lineValue > 0 ? '+' : ''}${lineValue}`;
+              else if (internalMarketKey.includes('_totals_ou') || internalMarketKey.includes('_team_points')) {
+                let prefix = '';
+                if (internalMarketKey.includes('team_points_home')) prefix = `${confirmedHomeTeamName} `; else if (internalMarketKey.includes('team_points_away')) prefix = `${confirmedAwayTeamName} `;
+                selectionName = `${prefix}${oddData.sideID === 'over' ? 'Over' : 'Under'} ${lineValue}`;
+              } else if (internalMarketKey.endsWith('_eo')) selectionName = oddData.sideID === 'even' ? 'Even' : 'Odd';
+              processingStats.periodMarketsProcessed++;
             }
           }
-        } else {
-          console.log(`No odds object or empty odds for event ${apiEvent.eventID}. Skipping odds processing.`);
+          // Main Game Markets
+          else if (oddData.periodID === 'game' || oddData.periodID === 'reg') {
+            if (oddData.betTypeID === 'ml') internalMarketKey = 'h2h';
+            else if (oddData.betTypeID === 'sp') internalMarketKey = 'spreads';
+            else if (oddData.betTypeID === 'ou' && oddData.statEntityID === 'all') internalMarketKey = 'totals';
+            else if (oddData.betTypeID === 'ou' && oddData.statEntityID === 'home') internalMarketKey = 'team_points_home_ou';
+            else if (oddData.betTypeID === 'ou' && oddData.statEntityID === 'away') internalMarketKey = 'team_points_away_ou';
+            else if (oddData.betTypeID === 'eo' && oddData.statEntityID === 'all') internalMarketKey = 'game_total_eo';
+            else if (oddData.betTypeID === 'eo' && oddData.statEntityID === 'home') internalMarketKey = 'team_points_home_eo';
+            else if (oddData.betTypeID === 'eo' && oddData.statEntityID === 'away') internalMarketKey = 'team_points_away_eo';
+            else if (oddData.betTypeID === 'ml3way' && oddData.periodID === 'reg') {
+              if (['home', 'away', 'draw'].includes(oddData.sideID)) internalMarketKey = 'reg_ml3way';
+              else if (['home+draw', 'away+draw', 'not_draw'].includes(oddData.sideID)) internalMarketKey = 'reg_double_chance';
+            }
+            mappedBetType = betTypeMapping.get(internalMarketKey || '');
+            if(mappedBetType && internalMarketKey) {
+              if (internalMarketKey === 'h2h') selectionName = oddData.statEntityID === 'home' ? confirmedHomeTeamName : confirmedAwayTeamName;
+              else if (internalMarketKey === 'spreads') selectionName = `${oddData.statEntityID === 'home' ? confirmedHomeTeamName : confirmedAwayTeamName} ${lineValue !== undefined && lineValue > 0 ? '+' : ''}${lineValue}`;
+              else if (internalMarketKey === 'totals') selectionName = `${oddData.sideID === 'over' ? 'Over' : 'Under'} ${lineValue}`;
+              else if (internalMarketKey === 'team_points_home_ou') selectionName = `${confirmedHomeTeamName} ${oddData.sideID === 'over' ? 'Over' : 'Under'} ${lineValue}`;
+              else if (internalMarketKey === 'team_points_away_ou') selectionName = `${confirmedAwayTeamName} ${oddData.sideID === 'over' ? 'Over' : 'Under'} ${lineValue}`;
+              else if (internalMarketKey.endsWith('_eo')) selectionName = oddData.sideID === 'even' ? 'Even' : 'Odd';
+              else if (internalMarketKey === 'reg_ml3way') { if (oddData.sideID === 'home') selectionName = confirmedHomeTeamName; else if (oddData.sideID === 'away') selectionName = confirmedAwayTeamName; else if (oddData.sideID === 'draw') selectionName = 'Draw'; }
+              else if (internalMarketKey === 'reg_double_chance') { if (oddData.sideID === 'home+draw') selectionName = `${confirmedHomeTeamName} or Draw`; else if (oddData.sideID === 'away+draw') selectionName = `${confirmedAwayTeamName} or Draw`; else if (oddData.sideID === 'not_draw') selectionName = `${confirmedHomeTeamName} or ${confirmedAwayTeamName}`; }
+              processingStats.mainMarketsProcessed++;
+            }
+          } else { processingStats.unknownOddFormatSkipped++; continue; }
+
+          if (!mappedBetType) { processingStats.noBetTypeMappingSkipped++; continue; }
+          if (!selectionName || selectionName.trim() === '' || selectionName.includes('undefined')) {
+            console.error(`[Error_EmptySelName] For mappedBetType '${mappedBetType.name}' (ID: ${mappedBetType.id}) from oddID_key: ${oddData.oddID_key}. InternalKey: ${internalMarketKey}, Side: ${oddData.sideID}. Skipping.`);
+            processingStats.emptySelectionNameSkipped++; continue;
+          }
+
+          const betToInsert = {
+            game_id: currentGameId, bet_type_id: mappedBetType.id, selection_name: selectionName,
+            odds: parseFloat(oddData.odds), line: lineValue, is_active: true,
+            source_bookmaker: oddData.bookmakerID || bookmakerForFairOdds, // Fallback to queried bookmaker if oddData.bookmakerID is missing
+            api_last_update: oddData.lastUpdate,
+          };
+          availableBetsToInsert.push(betToInsert);
         }
-      } catch (innerError) {
-        console.error(`Critical error processing event ${apiEvent.eventID}: ${innerError.message}`, innerError.stack);
-        processingStats.oddsEventsFailed++;
+      } else {
+        console.log(`[Info_NoOddsObject] No 'odds' object/data found or it's not an object for event ${event.eventID}. Skipping odds processing for this event.`);
       }
-    }
-    console.log('Finished processing events loop.');
 
-    // ... (time-based status update - same as before)
-    const now = new Date().toISOString();
-    try {
-      const { data: updatedGamesByTime, error: timeUpdateError } = await supabaseAdmin
-          .from('games').update({ status: 'live', last_score_update: now })
-          .eq('status', 'scheduled').lt('game_time', now).select('id');
-
-      if (timeUpdateError) console.error('Error in time-based status update:', timeUpdateError.message);
-      else if (updatedGamesByTime && updatedGamesByTime.length > 0) {
-        processingStats.timeBasedStatusUpdates = updatedGamesByTime.length;
-        console.log(`Time-based: ${updatedGamesByTime.length} games moved to 'live'.`);
+      if (availableBetsToInsert.length > 0) {
+        const { error: insertError } = await supabaseAdmin
+            .from('available_bets')
+            .upsert(availableBetsToInsert, {
+              onConflict: 'game_id,bet_type_id,selection_name,line',
+              ignoreDuplicates: false,
+            });
+        if (insertError) {
+          console.error(`[Error_DB_AvailableBetsUpsert] for game ${currentGameId} (${eventHomeTeamName} vs ${eventAwayTeamName}):`, insertError);
+        } else {
+          availableBetsInserted += availableBetsToInsert.length;
+          console.log(`[Info] Upserted ${availableBetsToInsert.length} available_bets for game ${currentGameId} (${eventHomeTeamName} vs ${eventAwayTeamName}).`);
+        }
+      } else {
+        console.log(`[Info] No new processable odds to insert/update for game ${currentGameId} (${eventHomeTeamName} vs ${eventAwayTeamName}).`);
       }
-    } catch (timeUpdateCatchError) {
-      console.error('Caught error during time-based status update:', timeUpdateCatchError.message);
-    }
+    } // End of events loop
 
-    console.log('Function fetch-sports-data complete.');
-    return new Response(JSON.stringify({ message: 'NFL sports data processing attempt complete (Fair Odds Only).', stats: processingStats }),
-        { headers: { ...corsHeaders, 'Content-Type': 'application/json' }, status: 200 });
+    const summaryMessage = `Function fetch-sports-data complete. Events Processed: ${fetchedEvents.length}, Games Upserted: ${gamesUpserted}, AvailableBets Upserted: ${availableBetsInserted}. Stats: MainMarkets=${processingStats.mainMarketsProcessed}, PeriodMarkets=${processingStats.periodMarketsProcessed}, PlayerMarkets=${processingStats.playerMarketsProcessed}, NoBetTypeMapSkipped=${processingStats.noBetTypeMappingSkipped}, EmptySelectionSkipped=${processingStats.emptySelectionNameSkipped}, UnknownFormatSkipped=${processingStats.unknownOddFormatSkipped}, NoOddsValueSkipped=${processingStats.noOddsValueSkipped}.`;
+    console.log(`[Info_Summary] ${summaryMessage}`);
 
+    return new Response(JSON.stringify({ success: true, message: summaryMessage, data: { gamesUpserted, availableBetsInserted, stats: processingStats } }), {
+      headers: { ...corsHeaders, 'Content-Type': 'application/json' }, status: 200,
+    });
   } catch (error) {
-    console.error('Critical error in fetch-sports-data (NFL v4.3 - Fair Odds Only):', error.message, error.stack);
-    return new Response(JSON.stringify({ error: error.message || "Unknown critical error" }),
-        { headers: { ...corsHeaders, 'Content-Type': 'application/json' }, status: 500 });
+    console.error('[FATAL_ERROR] In fetch-sports-data function:', error.message, error.stack ? error.stack : '(No stack trace)');
+    return new Response(JSON.stringify({ success: false, error: error.message }), {
+      headers: { ...corsHeaders, 'Content-Type': 'application/json' }, status: 500,
+    });
   }
 });

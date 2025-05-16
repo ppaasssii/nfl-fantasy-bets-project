@@ -1,0 +1,21 @@
+Setting up Edge Functions runtime...
+Serving functions on http://127.0.0.1:54321/functions/v1/<function-name>
+Using supabase-edge-runtime-1.67.4 (compatible with Deno v1.45.2)
+serving the request with supabase/functions/fetch-sports-data
+worker boot error: failed to create the graph: The module's source code could not be parsed: Expression expected at file:///Users/pascalknoller/Documents/nfl-fantasy-bets-project/supabase/functions/fetch-sports-data/index.ts:282:13
+
+            } else if (Array.isArray(event.odds)) {
+              ~~~~
+worker boot error: failed to create the graph: The module's source code could not be parsed: Expression expected at file:///Users/pascalknoller/Documents/nfl-fantasy-bets-project/supabase/functions/fetch-sports-data/index.ts:282:13
+
+            } else if (Array.isArray(event.odds)) {
+              ~~~~
+InvalidWorkerCreation: worker boot error: failed to create the graph: The module's source code could not be parsed: Expression expected at file:///Users/pascalknoller/Documents/nfl-fantasy-bets-project/supabase/functions/fetch-sports-data/index.ts:282:13
+
+            } else if (Array.isArray(event.odds)) {
+              ~~~~
+    at async UserWorker.create (ext:sb_user_workers/user_workers.js:139:15)
+    at async Object.handler (file:///root/index.ts:157:22)
+    at async respond (ext:sb_core_main_js/js/http.js:197:14) {
+  name: [32m"InvalidWorkerCreation"[39m
+}

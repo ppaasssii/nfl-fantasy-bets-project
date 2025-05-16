@@ -1,0 +1,46 @@
+.
+├── frontend
+│   ├── eslint.config.js
+│   ├── http-client.env.json
+│   ├── index.html
+│   ├── package-lock.json
+│   ├── package.json
+│   ├── postcss.config.js
+│   ├── public
+│   ├── src
+│   │   ├── App.tsx
+│   │   ├── components
+│   │   │   ├── BetHistoryPage.tsx
+│   │   │   ├── BetSlip.tsx
+│   │   │   ├── GameDetailPage.tsx
+│   │   │   ├── GameList.tsx
+│   │   │   └── ProfilePage.tsx
+│   │   ├── index.css
+│   │   ├── main.tsx
+│   │   ├── supabaseClient.ts
+│   │   └── vite-env.d.ts
+│   ├── tailwind.config.js
+│   ├── tsconfig.app.json
+│   ├── tsconfig.json
+│   ├── tsconfig.node.json
+│   └── vite.config.ts
+├── getAuthToken.js
+├── package-lock.json
+├── package.json
+├── project_structure.txt
+└── supabase
+    ├── config.toml
+    └── functions
+        ├── _shared
+        │   └── cors.ts
+        ├── fetch-sports-data
+        │   ├── deno.json
+        │   └── index.ts
+        ├── place-bet
+        │   ├── deno.json
+        │   └── index.ts
+        └── settle-bets
+            ├── deno.json
+            └── index.ts
+
+11 directories, 33 files

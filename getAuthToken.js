@@ -1,17 +1,21 @@
 // getAuthToken.js
+require('dotenv').config({ path: '.root.env' }); // Load .root.env
 const { createClient } = require('@supabase/supabase-js');
 
-// Replace with your actual Supabase URL and Anon Key
-const SUPABASE_URL = 'https://bvnlajhvnzflcyavhiff.supabase.co';
-const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImJ2bmxhamh2bnpmbGN5YXZoaWZmIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NDY4MzAwNDcsImV4cCI6MjA2MjQwNjA0N30.kO0yCoHZ_4B1z7gCNzsOj2uWJNoU6Gs376kF0O-jQCg';
+const SUPABASE_URL = process.env.SCRIPT_SUPABASE_URL || 'https://bvnlajhvnzflcyavhiff.supabase.co'; // Fallback or use env
+const SUPABASE_ANON_KEY = process.env.SCRIPT_SUPABASE_ANON_KEY || 'your_anon_key_here'; // Fallback or use env
 
 const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 
 async function signInAndGetToken() {
-    const email = 'pascal.knoller@gmail.com'; // IMPORTANT: Use an EXISTING user's email
-    const password = 'Spiderman1907!';     // The password for that user
+    const email = process.env.AUTH_EMAIL;
+    const password = process.env.AUTH_PASSWORD;
 
-    // Sign in the user
+    if (!email || !password) {
+        console.error('Email or password not found in .root.env file.');
+        return;
+    }
+
     try {
         const { data, error } = await supabase.auth.signInWithPassword({
             email: email,
@@ -27,7 +31,7 @@ async function signInAndGetToken() {
             console.log('Sign in successful!');
             console.log('User ID:', data.user.id);
             console.log('Access Token (JWT):');
-            console.log(data.session.access_token); // <-- THIS IS WHAT YOU NEED
+            console.log(data.session.access_token);
         } else {
             console.log('No session data received after sign in.');
         }
