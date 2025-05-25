@@ -1,42 +1,40 @@
 // frontend/src/components/BetSlip.tsx
 import React, { useState, useEffect } from 'react';
 import { toast } from 'react-toastify';
-import { type AvailableBetDetail } from './GameDetailPage.tsx'; // Added .tsx
+// Attempting to import AvailableBetDetail - GameDetailPage.tsx MUST export this.
+import { type AvailableBetDetail } from './GameDetailPage';
 
-// This is the info the BetSlip primarily works with for display
+// This is the info the BetSlip itself primarily works with for display purposes.
+// It can be constructed from either GameListSummaryBet or AvailableBetDetail.
 export interface SelectedBetDisplayInfo {
-    id: number; // available_bet.id
+    id: number; // This is the available_bet.id
     selection_name: string;
     odds: number;
     line: number | null;
-    bet_type_name: string; // From available_bets.bet_type.name
-    // Optional game info, might be useful for display or if onPlaceBet needs it
-    game_info?: {
-        home_team?: string;
-        away_team?: string;
-        game_time?: string;
-    };
+    bet_type_name: string;
+    // Optional: For displaying more context in the slip if needed
+    home_team?: string;
+    away_team?: string;
 }
 
-// This is what the onPlaceBet function from context likely expects
+// This is what the onPlaceBet function (passed as prop from DashboardLayout) expects for its 'selections'
 export interface BetPlacementSelection {
-    available_bet_id: number; // available_bet.id
-    // Potentially odds_at_placement if your backend wants it from client
-    // odds_at_placement: number;
+    available_bet_id: number;
+    // odds_at_placement: number; // Backend should ideally re-verify odds, but can be passed
 }
 
 interface BetSlipProps {
-    selectedBets: SelectedBetDisplayInfo[]; // Bets currently in the slip
+    selectedBets: SelectedBetDisplayInfo[]; // Array of bets currently in the slip
     onRemoveBet: (availableBetIdToRemove: number) => void;
     onClearSlip: () => void;
-    onPlaceBet: (
+    onPlaceBet: ( // This function is provided by DashboardLayout
         stake: number,
-        selections: BetPlacementSelection[], // More specific type
+        selections: BetPlacementSelection[],
         betType: 'single' | 'parlay'
     ) => Promise<void>;
-    isPlacingBet: boolean;
-    stake: string;
-    onStakeChange: (newStake: string) => void;
+    isPlacingBet: boolean; // Controlled by DashboardLayout
+    stake: string;         // Controlled by DashboardLayout
+    onStakeChange: (newStake: string) => void; // Controlled by DashboardLayout
 }
 
 const BetSlip: React.FC<BetSlipProps> = ({
@@ -56,7 +54,8 @@ const BetSlip: React.FC<BetSlipProps> = ({
         if (selectedBets.length === 0) {
             setTotalOdds(1);
             setPotentialPayout(0);
-            setCurrentBetType('single');
+            setCurrentBetType('single'); // Default to single if slip is empty
+            // Stake is managed by parent, will be cleared via onClearSlip -> handleClearSlip in DashboardLayout
             return;
         }
 
@@ -64,14 +63,18 @@ const BetSlip: React.FC<BetSlipProps> = ({
         if (selectedBets.length === 1) {
             setCurrentBetType('single');
             calculatedOdds = selectedBets[0].odds;
-        } else if (selectedBets.length > 1) {
+        } else { // More than 1 selection implies a parlay
             setCurrentBetType('parlay');
-            calculatedOdds = selectedBets.reduce((acc, bet) => acc * bet.odds, 1);
+            // Ensure all odds are numbers before reducing
+            calculatedOdds = selectedBets.reduce((acc, bet) => {
+                const oddValue = typeof bet.odds === 'number' && !isNaN(bet.odds) ? bet.odds : 1;
+                return acc * oddValue;
+            }, 1);
         }
         setTotalOdds(calculatedOdds);
 
         const numericStake = parseFloat(stake);
-        if (numericStake > 0 && calculatedOdds > 0) { // Ensure calculatedOdds is also positive
+        if (numericStake > 0 && calculatedOdds > 0) { // Check calculatedOdds as well
             setPotentialPayout(numericStake * calculatedOdds);
         } else {
             setPotentialPayout(0);
@@ -80,8 +83,9 @@ const BetSlip: React.FC<BetSlipProps> = ({
 
     const handleStakeInputChange = (e: React.ChangeEvent<HTMLInputElement>) => {
         const value = e.target.value;
+        // Allow empty string, or numbers with up to 2 decimal places
         if (/^\d*\.?\d{0,2}$/.test(value) || value === '') {
-            onStakeChange(value);
+            onStakeChange(value); // Call parent's handler
         }
     };
 
@@ -98,9 +102,9 @@ const BetSlip: React.FC<BetSlipProps> = ({
         // Prepare selections for the backend: just the available_bet_id
         const selectionsToPlace: BetPlacementSelection[] = selectedBets.map(b => ({
             available_bet_id: b.id,
-            // odds_at_placement: b.odds // Backend should re-verify odds anyway, but can pass if needed
         }));
         await onPlaceBet(numericStake, selectionsToPlace, currentBetType);
+        // Clearing the slip and stake is now handled by DashboardLayout upon successful bet placement.
     };
 
     if (selectedBets.length === 0 && !isPlacingBet) {
@@ -154,7 +158,7 @@ const BetSlip: React.FC<BetSlipProps> = ({
                 </div>
             )}
 
-            {isPlacingBet && selectedBets.length === 0 && ( // Should not happen if placeBet clears slip on success
+            {isPlacingBet && selectedBets.length === 0 && (
                 <p className="text-center text-sleeper-text-secondary py-4">Processing your bet...</p>
             )}
 
