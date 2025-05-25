@@ -3,270 +3,209 @@ import { serve } from 'https://deno.land/std@0.177.0/http/server.ts';
 import { createClient, SupabaseClient } from 'https://esm.sh/@supabase/supabase-js@2';
 import { corsHeaders } from '../_shared/cors.ts';
 
+// Ensure Supabase URL and Service Role Key are set in Edge Function environment variables
+// e.g., SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY
+
 interface BetSelectionRequest {
-  available_bet_id: number; // ID from the available_bets table
-  // Odds at placement will be fetched server-side for integrity
+  available_bet_id: number;
 }
 
 interface PlaceBetRequestBody {
   selections: BetSelectionRequest[];
   stake_amount: number;
-  bet_type: 'single' | 'parlay'; // Assuming 'single' for now, parlay logic can be complex
+  bet_type: 'single' | 'parlay';
 }
 
-console.log('place-bet function booting up');
+// Helper function to convert American odds to Decimal odds
+function americanToDecimal(americanOdds: number): number {
+  if (americanOdds > 0) { // For positive odds (e.g., +150)
+    return (americanOdds / 100) + 1;
+  } else if (americanOdds < 0) { // For negative odds (e.g., -200)
+    return (100 / Math.abs(americanOdds)) + 1;
+  }
+  // This case should ideally not be hit if odds are valid American odds (non-zero)
+  // Returning 1 implies even money or an invalid input leading to no change in payout from stake.
+  console.warn(`[place-bet] Invalid or zero American odd received for conversion: ${americanOdds}`);
+  return 1;
+}
 
-serve(async (req: Request) => {
+function getSupabaseAdminClient(): SupabaseClient {
+  const supabaseUrl = Deno.env.get('SUPABASE_URL');
+  const supabaseServiceRoleKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY');
+  if (!supabaseUrl || !supabaseServiceRoleKey) {
+    console.error("[place-bet] Supabase URL or Service Role Key missing.");
+    throw new Error('Server configuration error: Supabase credentials not set.');
+  }
+  return createClient(supabaseUrl, supabaseServiceRoleKey, {
+    auth: { autoRefreshToken: false, persistSession: false, detectSessionInUrl: false }
+  });
+}
+
+serve(async (req) => {
+  console.log("[place-bet] Function invoked (v2 - Decimal Odds Calc).");
+
   if (req.method === 'OPTIONS') {
+    console.log("[place-bet] Handling OPTIONS request.");
     return new Response('ok', { headers: corsHeaders });
   }
 
   try {
-    // 1. Initialize Supabase Admin Client
-    const SUPABASE_SERVICE_ROLE_KEY = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY');
-    const supabaseUrl = Deno.env.get('SUPABASE_URL');
-    if (!SUPABASE_SERVICE_ROLE_KEY || !supabaseUrl) {
-      throw new Error('Missing Supabase service role key or URL.');
-    }
-    const supabaseAdmin = createClient(supabaseUrl, SUPABASE_SERVICE_ROLE_KEY);
-    console.log('Supabase admin client initialized for place-bet.');
+    const supabaseAdmin = getSupabaseAdminClient();
+    console.log("[place-bet] Supabase admin client initialized.");
 
-    // 2. Get User (Auth is handled by Supabase gateway due to verify_jwt=true)
-    // The user object is automatically available in the request context when verify_jwt is true.
-    // However, Deno's `req` object doesn't directly expose it.
-    // We need to get the Authorization header to extract the JWT and get user ID from it.
-    // OR, rely on the fact that if the function is reached, the user is valid,
-    // and then use `supabase.auth.getUser()` with the user's JWT if needed.
-    // For simplicity with service_role key, we'll get user_id from JWT passed by client.
-    // A more robust way when verify_jwt=true is to have Supabase inject user details,
-    // but for now, let's assume client sends user_id or we extract from JWT.
-
-    // For this example, we'll assume the client will eventually send the JWT,
-    // and we'd decode it. A simpler interim step is for testing, or if frontend can pass user_id.
-    // Let's extract from the Authorization header (BEARER token)
     const authHeader = req.headers.get('Authorization');
     if (!authHeader) {
-      return new Response(JSON.stringify({ error: 'Missing Authorization header.' }), {
-        headers: { ...corsHeaders, 'Content-Type': 'application/json' }, status: 401,
+      console.error("[place-bet] Missing Authorization header.");
+      return new Response(JSON.stringify({ error: 'Authentication required.' }), {
+        status: 401, headers: { ...corsHeaders, 'Content-Type': 'application/json' }
       });
     }
     const token = authHeader.replace('Bearer ', '');
     const { data: { user }, error: userError } = await supabaseAdmin.auth.getUser(token);
 
     if (userError || !user) {
-      console.error('Error getting user from token:', userError);
-      return new Response(JSON.stringify({ error: 'Invalid user token.' }), {
-        headers: { ...corsHeaders, 'Content-Type': 'application/json' }, status: 401,
+      console.error("[place-bet] User auth failed:", userError?.message || "User not found.");
+      return new Response(JSON.stringify({ error: 'Authentication failed.', details: userError?.message }), {
+        status: 401, headers: { ...corsHeaders, 'Content-Type': 'application/json' }
       });
     }
-    const userId = user.id;
-    console.log(`Bet placement request for user ID: ${userId}`);
+    console.log(`[place-bet] User ${user.id} authenticated.`);
 
-
-    // 3. Parse Request Body
-    const requestBody: PlaceBetRequestBody = await req.json();
-    const { selections, stake_amount, bet_type } = requestBody;
+    const body: PlaceBetRequestBody = await req.json();
+    const { selections, stake_amount, bet_type } = body;
+    console.log(`[place-bet] Request: ${selections?.length} sel, stake ${stake_amount}, type ${bet_type}.`);
 
     if (!selections || selections.length === 0 || !stake_amount || stake_amount <= 0 || !bet_type) {
-      return new Response(JSON.stringify({ error: 'Invalid request body. Selections, stake_amount, and bet_type are required.' }), {
-        headers: { ...corsHeaders, 'Content-Type': 'application/json' }, status: 400,
+      console.error("[place-bet] Invalid request body:", body);
+      return new Response(JSON.stringify({ error: 'Invalid request body.' }), {
+        status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' }
       });
     }
-    // For now, let's simplify and assume bet_type is 'single' and there's only one selection
-    // You can expand this later to handle multiple selections for parlays.
-    if (bet_type === 'single' && selections.length !== 1) {
-      return new Response(JSON.stringify({ error: 'Single bets must have exactly one selection.' }), {
-        headers: { ...corsHeaders, 'Content-Type': 'application/json' }, status: 400,
-      });
-    }
-    // TODO: Add parlay validation if selections.length > 1 and bet_type === 'parlay'
 
-
-    // 4. Fetch User's Profile & Balance
+    console.log(`[place-bet] Fetching profile for user ${user.id}.`);
     const { data: profile, error: profileError } = await supabaseAdmin
-        .from('profiles')
-        .select('fantasy_balance')
-        .eq('id', userId)
-        .single();
+        .from('profiles').select('fantasy_balance').eq('id', user.id).single();
 
     if (profileError || !profile) {
-      console.error(`Profile not found for user ${userId}:`, profileError);
-      return new Response(JSON.stringify({ error: 'User profile not found.' }), {
-        headers: { ...corsHeaders, 'Content-Type': 'application/json' }, status: 404,
+      console.error(`[place-bet] Err fetching profile ${user.id}:`, profileError?.message || "Not found.");
+      return new Response(JSON.stringify({ error: 'Failed to fetch profile.', d: profileError?.message }), {
+        status: 404, headers: { ...corsHeaders, 'Content-Type': 'application/json' }
       });
     }
-    if (profile.fantasy_balance < stake_amount) {
+    console.log(`[place-bet] User ${user.id} balance: ${profile.fantasy_balance}. Stake: ${stake_amount}`);
+    if (profile.fantasy_balance === null || profile.fantasy_balance < stake_amount) {
+      console.warn(`[place-bet] User ${user.id} insufficient balance. Has: ${profile.fantasy_balance}, Needs: ${stake_amount}.`);
       return new Response(JSON.stringify({ error: 'Insufficient fantasy balance.' }), {
-        headers: { ...corsHeaders, 'Content-Type': 'application/json' }, status: 400,
+        status: 402, headers: { ...corsHeaders, 'Content-Type': 'application/json' }
       });
     }
 
-    // 5. Validate Each Bet Selection (Crucial Step)
-    let totalOddsForBet = 1;
-    const validatedSelectionsData = []; // To store full data of validated selections
+    const selectionIds = selections.map(s => s.available_bet_id);
+    console.log(`[place-bet] Fetching details for available_bet IDs: ${selectionIds.join(', ')}.`);
+    const { data: availableBetsDetails, error: betsFetchError } = await supabaseAdmin
+        .from('available_bets').select('id, odds, is_active, selection_name').in('id', selectionIds);
 
-    for (const selection of selections) {
-      const { data: availableBet, error: betFetchError } = await supabaseAdmin
-          .from('available_bets')
-          .select(`
-          id, 
-          odds,
-          line,
-          is_active,
-          game_id,
-          games (
-            id,
-            status,
-            game_time
-          )
-        `)
-          .eq('id', selection.available_bet_id)
-          .single();
-
-      if (betFetchError || !availableBet) {
-        console.error(`Available bet ID ${selection.available_bet_id} not found:`, betFetchError);
-        return new Response(JSON.stringify({ error: `Bet selection ID ${selection.available_bet_id} not found.` }), {
-          headers: { ...corsHeaders, 'Content-Type': 'application/json' }, status: 404,
-        });
-      }
-
-      if (!availableBet.is_active) {
-        return new Response(JSON.stringify({ error: `Bet ID ${availableBet.id} is no longer active.` }), {
-          headers: { ...corsHeaders, 'Content-Type': 'application/json' }, status: 400,
-        });
-      }
-
-      if (!availableBet.games) { // Should not happen if FK is set up correctly
-        console.error(`Game data missing for available_bet ID ${availableBet.id}`);
-        return new Response(JSON.stringify({ error: `Internal error: Game data missing for bet ${availableBet.id}.` }), {
-          headers: { ...corsHeaders, 'Content-Type': 'application/json' }, status: 500,
-        });
-      }
-
-      // Game Status and Time Validation
-      if (availableBet.games.status !== 'scheduled') {
-        return new Response(JSON.stringify({ error: `Game for bet ID ${availableBet.id} is not scheduled (status: ${availableBet.games.status}). Bets cannot be placed.` }), {
-          headers: { ...corsHeaders, 'Content-Type': 'application/json' }, status: 400,
-        });
-      }
-      const gameTime = new Date(availableBet.games.game_time);
-      if (gameTime <= new Date()) {
-        return new Response(JSON.stringify({ error: `Game for bet ID ${availableBet.id} has already started or passed.` }), {
-          headers: { ...corsHeaders, 'Content-Type': 'application/json' }, status: 400,
-        });
-      }
-
-      totalOddsForBet *= availableBet.odds; // For parlays; for singles, this is just the selection's odds
-      validatedSelectionsData.push({
-        available_bet_id: availableBet.id,
-        odds_at_placement: availableBet.odds,
-        // line_at_placement: availableBet.line // If you need to store this too
+    if (betsFetchError) {
+      console.error("[place-bet] Error fetching bet details:", betsFetchError.message);
+      return new Response(JSON.stringify({ error: 'Failed to verify selections.', d: betsFetchError.message }), {
+        status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+      });
+    }
+    if (!availableBetsDetails || availableBetsDetails.length !== selections.length) {
+      const foundIds = availableBetsDetails?.map(b => b.id) || [];
+      const missingIds = selectionIds.filter(id => !foundIds.includes(id));
+      console.error("[place-bet] Mismatch/missing bet IDs. Req:", selections.length, "Found:", availableBetsDetails?.length, "Missing:", missingIds);
+      return new Response(JSON.stringify({ error: 'One or more selections invalid/not found.' }), {
+        status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' }
       });
     }
 
-    // 6. Calculate Potential Payout
-    const potentialPayout = stake_amount * totalOddsForBet;
+    const inactiveBets = availableBetsDetails.filter(b => !b.is_active);
+    if (inactiveBets.length > 0) {
+      const inactiveNames = inactiveBets.map(b => b.selection_name || `ID ${b.id}`).join(', ');
+      console.warn(`[place-bet] Bet on inactive selections: ${inactiveNames}`);
+      return new Response(JSON.stringify({ error: `Selections no longer active: ${inactiveNames}.` }), {
+        status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+      });
+    }
 
-    // 7. Database Transaction: Deduct balance, insert bet, selections, transaction
-    // This should ideally be a database transaction (e.g., using a plpgsql function)
-    // to ensure atomicity. For Edge Functions, we do it step-by-step.
-    // If a step fails, manual rollback/compensation would be complex.
-    // For this fantasy app, sequential operations are likely acceptable.
+    // --- Odds Calculation with American to Decimal Conversion ---
+    let calculatedTotalDecimalOdds = 1.0;
+    if (bet_type === 'single') {
+      if (availableBetsDetails.length !== 1) {
+        return new Response(JSON.stringify({ error: 'Single bet type requires 1 selection.' }), { status: 400, headers: corsHeaders });
+      }
+      calculatedTotalDecimalOdds = americanToDecimal(availableBetsDetails[0].odds);
+    } else { // Parlay
+      for (const bet of availableBetsDetails) {
+        calculatedTotalDecimalOdds *= americanToDecimal(bet.odds);
+      }
+    }
+    // Round decimal odds to a reasonable precision, e.g., 4 decimal places
+    calculatedTotalDecimalOdds = parseFloat(calculatedTotalDecimalOdds.toFixed(4));
 
-    // 7a. Deduct stake from profile
+    const potentialPayout = parseFloat((stake_amount * calculatedTotalDecimalOdds).toFixed(2)); // Round to 2 decimal places for currency
+    console.log(`[place-bet] American Odds from DB: ${availableBetsDetails.map(b => b.odds).join(', ')}`);
+    console.log(`[place-bet] Calculated Total Decimal Odds: ${calculatedTotalDecimalOdds}, Potential Payout: ${potentialPayout}`);
+    // --- End Odds Calculation ---
+
     const newBalance = profile.fantasy_balance - stake_amount;
+    console.log(`[place-bet] Deducting ${stake_amount}. User ${user.id} new balance: ${newBalance}.`);
     const { error: balanceUpdateError } = await supabaseAdmin
-        .from('profiles')
-        .update({ fantasy_balance: newBalance })
-        .eq('id', userId);
-
+        .from('profiles').update({ fantasy_balance: newBalance, updated_at: new Date().toISOString() }).eq('id', user.id);
     if (balanceUpdateError) {
-      console.error('Error updating user balance:', balanceUpdateError);
-      // TODO: Consider if you need to refund anything if other steps had partially succeeded.
-      // For now, assume this is the first major state change.
-      return new Response(JSON.stringify({ error: 'Failed to update balance.' }), {
-        headers: { ...corsHeaders, 'Content-Type': 'application/json' }, status: 500,
-      });
+      console.error(`[place-bet] Err updating balance for ${user.id}:`, balanceUpdateError.message);
+      return new Response(JSON.stringify({ error: 'Failed to update balance.', d: balanceUpdateError.message }), { status: 500, headers: corsHeaders });
     }
+    console.log(`[place-bet] Balance updated for ${user.id}.`);
 
-    // 7b. Insert into user_bets
-    const { data: newUserBet, error: userBetInsertError } = await supabaseAdmin
+    console.log(`[place-bet] Inserting into user_bets for ${user.id}.`);
+    const { data: insertedBet, error: betInsertError } = await supabaseAdmin
         .from('user_bets')
         .insert({
-          user_id: userId,
-          stake_amount: stake_amount,
-          potential_payout: potentialPayout,
-          total_odds: totalOddsForBet,
-          status: 'pending', // 'pending', 'won', 'lost', 'void'
-          bet_type: bet_type, // 'single' or 'parlay'
-        })
-        .select('id')
-        .single();
+          user_id: user.id, stake_amount: stake_amount, potential_payout: potentialPayout,
+          total_odds: calculatedTotalDecimalOdds, // Storing combined decimal odds
+          status: 'pending', bet_type: bet_type,
+        }).select().single();
 
-    if (userBetInsertError || !newUserBet) {
-      console.error('Error inserting new user_bet:', userBetInsertError);
-      // CRITICAL: Rollback balance deduction if possible or flag for admin
-      // For now, just error out. A proper transaction would handle this.
-      // Attempt to refund (best effort)
-      await supabaseAdmin.from('profiles').update({ fantasy_balance: profile.fantasy_balance }).eq('id', userId);
-      return new Response(JSON.stringify({ error: 'Failed to record bet. Stake may have been deducted and refunded.' }), {
-        headers: { ...corsHeaders, 'Content-Type': 'application/json' }, status: 500,
-      });
+    if (betInsertError || !insertedBet) {
+      console.error(`[place-bet] Err inserting bet for ${user.id}:`, betInsertError?.message || "No data from insert.");
+      console.log(`[place-bet] CRITICAL: Rolling back balance for ${user.id}.`);
+      await supabaseAdmin.from('profiles').update({ fantasy_balance: profile.fantasy_balance, updated_at: new Date().toISOString() }).eq('id', user.id); // Refund
+      return new Response(JSON.stringify({ error: 'Failed to record bet. Balance restored.', d: betInsertError?.message }), { status: 500, headers: corsHeaders });
     }
-    const userBetId = newUserBet.id;
+    const userBetId = insertedBet.id;
+    console.log(`[place-bet] Bet ID ${userBetId} inserted.`);
 
-    // 7c. Insert into user_bet_selections
-    const selectionsToInsert = validatedSelectionsData.map(sel => ({
-      user_bet_id: userBetId,
-      available_bet_id: sel.available_bet_id,
-      odds_at_placement: sel.odds_at_placement,
+    const selectionsToInsert = availableBetsDetails.map(dbBet => ({
+      user_bet_id: userBetId, available_bet_id: dbBet.id,
+      odds_at_placement: dbBet.odds // Store original American odd from DB at placement time
     }));
-
-    const { error: selectionsInsertError } = await supabaseAdmin
-        .from('user_bet_selections')
-        .insert(selectionsToInsert);
+    console.log(`[place-bet] Inserting ${selectionsToInsert.length} selections for bet_id ${userBetId}.`);
+    const { error: selectionsInsertError } = await supabaseAdmin.from('user_bet_selections').insert(selectionsToInsert);
 
     if (selectionsInsertError) {
-      console.error('Error inserting user_bet_selections:', selectionsInsertError);
-      // CRITICAL: Rollback user_bets and balance. Complex without transactions.
-      // Flag for admin or attempt best-effort rollback.
-      // For now, just error out.
-      // Attempt to delete user_bet and refund (best effort)
-      await supabaseAdmin.from('user_bets').delete().eq('id', userBetId);
-      await supabaseAdmin.from('profiles').update({ fantasy_balance: profile.fantasy_balance }).eq('id', userId);
-      return new Response(JSON.stringify({ error: 'Failed to record bet selections. Bet may have been voided and stake refunded.' }), {
-        headers: { ...corsHeaders, 'Content-Type': 'application/json' }, status: 500,
-      });
+      console.error(`[place-bet] Err inserting selections for bet ${userBetId}:`, selectionsInsertError.message);
+      await supabaseAdmin.from('user_bets').update({ status: 'error_selections_failed' }).eq('id', userBetId);
+      console.log(`[place-bet] CRITICAL: Rolling back balance for user ${user.id}.`);
+      await supabaseAdmin.from('profiles').update({ fantasy_balance: profile.fantasy_balance, updated_at: new Date().toISOString() }).eq('id', user.id); // Refund
+      return new Response(JSON.stringify({ error: 'Bet recorded but selections failed. Balance restored.', d: selectionsInsertError.message }), { status: 500, headers: corsHeaders });
     }
+    console.log(`[place-bet] Bet selections inserted for ${userBetId}.`);
 
-    // 7d. Insert into transactions
-    const { error: transactionInsertError } = await supabaseAdmin
-        .from('transactions')
-        .insert({
-          user_id: userId,
-          type: 'bet_placed', // e.g., 'bet_placed', 'bet_winnings', 'deposit', 'withdrawal'
-          amount: -stake_amount, // Negative for placing a bet
-          related_user_bet_id: userBetId,
-          description: `Placed ${bet_type} bet.`,
-        });
+    console.log(`[place-bet] Inserting transaction for ${user.id}, bet ${userBetId}.`);
+    const { error: transactionError } = await supabaseAdmin.from('transactions')
+        .insert({ user_id: user.id, type: 'bet_placed', amount: -stake_amount, related_user_bet_id: userBetId, description: `Placed ${bet_type} bet.` });
+    if (transactionError) console.warn(`[place-bet] Warn: Failed to record tx for bet ${userBetId}:`, transactionError.message);
+    else console.log(`[place-bet] Tx recorded for bet ${userBetId}.`);
 
-    if (transactionInsertError) {
-      console.error('Error inserting transaction:', transactionInsertError);
-      // This is less critical for bet validity but important for audit. Log and continue.
-      // Consider how to handle this - maybe a retry queue for transactions.
-    }
-
-    console.log(`Bet ID ${userBetId} placed successfully for user ${userId}.`);
-    return new Response(JSON.stringify({ success: true, message: 'Bet placed successfully!', user_bet_id: userBetId, new_balance: newBalance }), {
-      headers: { ...corsHeaders, 'Content-Type': 'application/json' },
-      status: 200,
+    console.log(`[place-bet] Bet ${userBetId} placed successfully for ${user.id}.`);
+    return new Response(JSON.stringify({ success: true, message: 'Bet placed successfully!', data: { user_bet_id: userBetId, new_balance: newBalance } }), {
+      status: 201, headers: { ...corsHeaders, 'Content-Type': 'application/json' },
     });
 
   } catch (error) {
-    console.error('Critical error in place-bet function:', error.message, error.stack);
-    return new Response(JSON.stringify({ error: error.message || 'An unexpected error occurred.' }), {
-      headers: { ...corsHeaders, 'Content-Type': 'application/json' },
-      status: 500,
-    });
+    console.error('[place-bet] UNHANDLED MAIN CATCH ERROR:', error.message, error.stack);
+    return new Response(JSON.stringify({ error: 'Unexpected error placing bet.', details: error.message }), { status: 500, headers: corsHeaders });
   }
 });
