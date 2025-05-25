@@ -1,124 +1,127 @@
-// src/components/ProfilePage.tsx
+// frontend/src/components/ProfilePage.tsx
 import React, { useEffect, useState, useCallback } from 'react';
 import { supabase } from '../supabaseClient';
-import { useAuthContext } from '../App'; // Use the correct context hook for session
+import { useAuthContext } from '../App'; // Assuming AuthContext is provided via App
 import { toast } from 'react-toastify';
+import { User } from '@supabase/supabase-js'; // Import User type
 
 interface ProfileData {
     username: string | null;
     fantasy_balance: number | null;
-    created_at?: string; // This comes from auth.users, profiles might have its own or rely on join
+    created_at?: string; // This is the profile's created_at or auth user's
     updated_at?: string; // For optimistic updates or if you store it
 }
 
 const ProfilePage: React.FC = () => {
-    const { session } = useAuthContext(); // Correctly use useAuthContext
+    const { session } = useAuthContext();
     const [loading, setLoading] = useState(true);
     const [profile, setProfile] = useState<ProfileData | null>(null);
     const [usernameInput, setUsernameInput] = useState('');
     const [isUpdatingUsername, setIsUpdatingUsername] = useState(false);
 
-    const fetchProfile = useCallback(async (isMounted: boolean) => {
+    const createDefaultProfileView = (authUser: User): ProfileData => {
+        const defaultUsername = authUser.email?.split('@')[0] || `Player${authUser.id.substring(0, 4)}`;
+        return {
+            username: defaultUsername,
+            fantasy_balance: 1000, // Default starting balance
+            created_at: authUser.created_at // Use user's auth creation time
+        };
+    };
+
+    const fetchProfile = useCallback(async () => {
         if (!session?.user) {
-            if (isMounted) setLoading(false);
+            setLoading(false);
+            setProfile(null); // Clear profile if no session
             return;
         }
-        if (isMounted) setLoading(true);
+        setLoading(true);
         try {
             const { data, error } = await supabase
                 .from('profiles')
-                .select('username, fantasy_balance, created_at') // Assuming created_at on profiles is desired
+                .select('username, fantasy_balance, created_at') // created_at from profiles table
                 .eq('id', session.user.id)
                 .single();
 
-            if (!isMounted) return;
-
             if (error) {
-                if (error.code === 'PGRST116') { // Profile doesn't exist yet
-                    console.warn('ProfilePage: No profile found. Creating a default view.');
-                    toast.info("Welcome! Please complete your profile by setting a username.");
-                    const defaultUsername = session.user.email?.split('@')[0] || 'NewPlayer';
-                    // For a new user, created_at should ideally come from auth.users.created_at
-                    setProfile({
-                        username: defaultUsername,
-                        fantasy_balance: 1000, // Default starting balance
-                        created_at: session.user.created_at // Use user's auth creation time
-                    });
-                    setUsernameInput(defaultUsername);
+                if (error.code === 'PGRST116') { // Profile doesn't exist for user yet
+                    console.warn('ProfilePage: No profile row. Using default view and encouraging update.');
+                    const defaultView = createDefaultProfileView(session.user);
+                    setProfile(defaultView);
+                    setUsernameInput(defaultView.username || '');
+                    toast.info("Welcome! Set your username to complete your profile.");
                 } else {
-                    throw error; // Re-throw other errors
+                    throw error;
                 }
             } else if (data) {
                 setProfile({
                     ...data,
-                    created_at: data.created_at || session.user.created_at // Prefer profile's created_at, fallback to auth user
+                    // If profiles.created_at is null/undefined (should not happen if table has default), use auth user's
+                    created_at: data.created_at || session.user.created_at
                 });
-                setUsernameInput(data.username || session.user.email?.split('@')[0] || '');
+                setUsernameInput(data.username || '');
+            } else { // Should not happen with .single() unless error, but as a fallback
+                console.warn('ProfilePage: No profile data returned and no error. Using default.');
+                const defaultView = createDefaultProfileView(session.user);
+                setProfile(defaultView);
+                setUsernameInput(defaultView.username || '');
             }
         } catch (error: any) {
-            if (!isMounted) return;
             console.error(`Error fetching profile:`, error);
             toast.error(`Error fetching profile: ${error.message}`);
-            // Set a default profile view on error to prevent app crash
-            setProfile({
-                username: session.user.email?.split('@')[0] || 'ErrorUser',
-                fantasy_balance: 0,
-                created_at: session.user.created_at
-            });
+            // Fallback to a default view on error
+            if (session?.user) {
+                const defaultView = createDefaultProfileView(session.user);
+                setProfile(defaultView);
+                setUsernameInput(defaultView.username || '');
+            }
         } finally {
-            if (isMounted) setLoading(false);
+            setLoading(false);
         }
     }, [session]);
 
     useEffect(() => {
-        let isMounted = true;
-        if (session?.user) {
-            fetchProfile(isMounted);
-        } else {
-            setLoading(false); // Not loading if no session
-            setProfile(null); // Clear profile if no session
-        }
+        fetchProfile();
 
-        let profileSubscription: any = null;
+        let profileSubscription: ReturnType<typeof supabase.channel> | null = null;
         if (session?.user) {
             profileSubscription = supabase
-                .channel(`public:profiles:id=eq.${session.user.id}_profile_page_channel`)
+                .channel(`public:profiles:id=eq.${session.user.id}`)
                 .on(
                     'postgres_changes',
                     { event: '*', schema: 'public', table: 'profiles', filter: `id=eq.${session.user.id}` },
                     (payload) => {
                         console.log('ProfilePage: Profile change received (realtime)!', payload);
-                        if (!isMounted) return;
                         if (payload.eventType === 'UPDATE' || payload.eventType === 'INSERT') {
-                            const updatedProfile = payload.new as ProfileData;
-                            setProfile(prev => ({
-                                ...prev,
-                                username: updatedProfile.username !== undefined ? updatedProfile.username : prev?.username,
-                                fantasy_balance: updatedProfile.fantasy_balance !== undefined ? updatedProfile.fantasy_balance : prev?.fantasy_balance,
-                                // created_at usually doesn't change, but keep it from prev if not in payload
-                                created_at: updatedProfile.created_at !== undefined ? updatedProfile.created_at : (prev?.created_at || session.user.created_at),
-                            }));
+                            const updatedRecord = payload.new as ProfileData; // Assuming new record matches ProfileData structure
+                            setProfile(currentProfile => {
+                                // Merge, ensuring existing created_at (from auth fallback) is preserved if not in payload
+                                const baseCreatedAt = currentProfile?.created_at || session.user?.created_at;
+                                return {
+                                    username: updatedRecord.username,
+                                    fantasy_balance: updatedRecord.fantasy_balance,
+                                    created_at: updatedRecord.created_at || baseCreatedAt,
+                                    updated_at: updatedRecord.updated_at,
+                                };
+                            });
                             // Only update usernameInput if user is not actively editing it
-                            if (updatedProfile.username && usernameInput !== updatedProfile.username && !isUpdatingUsername) {
-                                setUsernameInput(updatedProfile.username);
+                            if (updatedRecord.username && usernameInput !== updatedRecord.username && !document.hasFocus()) { // Example condition
+                                setUsernameInput(updatedRecord.username);
                             }
                         }
                     }
                 )
                 .subscribe((status, err) => {
                     if (status === 'SUBSCRIBED') console.log('ProfilePage: Subscribed to profile changes.');
-                    if (err) { console.error('ProfilePage: Subscription error', err); toast.error("Realtime connection error for profile.")}
+                    if (err) console.error('ProfilePage: Subscription error', err);
                 });
         }
         return () => {
-            isMounted = false;
             if (profileSubscription) {
                 supabase.removeChannel(profileSubscription)
-                    .then(() => console.log('ProfilePage: Unsubscribed from profile changes.'))
-                    .catch(err => console.error('ProfilePage: Error unsubscribing', err));
+                    .catch(err => console.error('ProfilePage: Error unsubscribing from profile', err));
             }
         };
-    }, [session, fetchProfile, isUpdatingUsername]); // Added isUpdatingUsername
+    }, [session, fetchProfile]); // Removed isUpdatingUsername as it's mainly for form submission state
 
     const handleUsernameUpdate = async (event: React.FormEvent<HTMLFormElement>) => {
         event.preventDefault();
@@ -134,30 +137,26 @@ const ProfilePage: React.FC = () => {
 
         setIsUpdatingUsername(true);
         try {
-            // Check if profile exists for an update, otherwise it might be an insert (upsert)
-            // For simplicity, current Supabase RLS usually handles this via an `upsert` in a trigger or policy
-            // We'll assume an `update` is intended if `fetchProfile` found a profile.
-            // If `fetchProfile` created a default client-side view due to PGRST116, an `insert` might be needed.
-            // Supabase `update` will fail if row doesn't exist. `upsert` is safer if unsure.
-            // Let's stick to `update` as `fetchProfile` attempts to create a default view on PGRST116
-            // which means next time it might try to update that (if it got created by a trigger).
-            // This part is complex without knowing exact DB trigger/RLS for profile creation.
-            // Assuming profile row is created by a trigger on auth.users insert.
-
+            // Using upsert ensures that if a profile row doesn't exist (e.g., new user first time), it will be created.
+            // If it exists, it will be updated.
+            // Your Supabase RLS policies must allow upsert/insert/update for authenticated users on their own profile.
+            // A trigger might set created_at on insert if not provided.
             const updates = {
+                id: session.user.id, // Crucial for upsert to identify the row
                 username: trimmedUsername,
                 updated_at: new Date().toISOString(),
+                // Do not send fantasy_balance or created_at unless intentionally modifying them here
             };
 
             const { error } = await supabase
                 .from('profiles')
-                .update(updates)
-                .eq('id', session.user.id);
+                .upsert(updates, { onConflict: 'id' }) // Upsert on 'id' conflict
+                .select() // Select to confirm the operation (optional but good practice)
+                .single(); // If you expect one row back
 
             if (error) throw error;
 
-            // Optimistic update for UI, though realtime should also catch it
-            setProfile(prev => prev ? { ...prev, username: trimmedUsername } : null);
+            setProfile(prev => prev ? { ...prev, username: trimmedUsername, updated_at: updates.updated_at } : { username: trimmedUsername, fantasy_balance: 1000, updated_at: updates.updated_at, created_at: session.user?.created_at }); // Optimistic update
             toast.success('Username updated successfully!');
         } catch (error: any) {
             toast.error(`Error updating username: ${error.message}`);
@@ -166,19 +165,22 @@ const ProfilePage: React.FC = () => {
         }
     };
 
-    if (loading) return (
+
+    if (loading && !profile) return ( // Show loading only if profile is also not yet set (initial load)
         <div className="p-6 bg-sleeper-surface rounded-xl shadow-xl max-w-2xl mx-auto text-center border border-sleeper-border">
             <p className="text-sleeper-text-secondary text-lg">Loading profile...</p>
         </div>
     );
 
-    if (!session || !profile ) { // If no session, or session exists but profile is null (e.g. error during fetch)
+    if (!session || !profile) {
         return (
             <div className="p-6 bg-sleeper-surface rounded-xl shadow-xl max-w-2xl mx-auto text-center border border-sleeper-border">
-                <p className="text-sleeper-error text-lg">Could not load profile data. Please try again later or ensure you are logged in.</p>
+                <p className="text-sleeper-text-secondary text-lg">Please log in to view your profile.</p>
+                {/* Optionally, add a login button or redirect here */}
             </div>
         );
     }
+
 
     return (
         <div className="p-4 sm:p-8 bg-sleeper-bg-secondary rounded-xl shadow-2xl max-w-2xl mx-auto border border-sleeper-border">
@@ -198,7 +200,6 @@ const ProfilePage: React.FC = () => {
                             <span className="font-medium text-sleeper-text-secondary w-full sm:w-32 shrink-0 mb-1 sm:mb-0">User ID:</span>
                             <span className="text-sleeper-text-primary text-xs break-all">{session.user?.id}</span>
                         </div>
-                        {/* Use profile.created_at which might be from 'profiles' or fallback from 'auth.users' */}
                         {profile.created_at && (
                             <div className="flex flex-col sm:flex-row sm:items-center">
                                 <span className="font-medium text-sleeper-text-secondary w-full sm:w-32 shrink-0 mb-1 sm:mb-0">Joined:</span>
@@ -231,7 +232,7 @@ const ProfilePage: React.FC = () => {
                         </div>
                         <button
                             type="submit"
-                            className="w-full sm:w-auto px-6 py-2.5 bg-sleeper-primary hover:bg-sleeper-primary-hover text-white font-semibold rounded-md shadow-md transition-colors duration-150 ease-in-out disabled:opacity-60 disabled:cursor-not-allowed focus:outline-none focus:ring-2 focus:ring-sleeper-primary focus:ring-offset-2 focus:ring-offset-sleeper-surface"
+                            className="w-full sm:w-auto px-6 py-2.5 bg-sleeper-primary hover:bg-opacity-80 text-white font-semibold rounded-md shadow-md transition-colors duration-150 ease-in-out disabled:opacity-60 disabled:cursor-not-allowed focus:outline-none focus:ring-2 focus:ring-sleeper-primary focus:ring-offset-2 focus:ring-offset-sleeper-surface"
                             disabled={isUpdatingUsername || !usernameInput.trim() || (profile && usernameInput.trim() === profile.username)}
                         >
                             {isUpdatingUsername ?

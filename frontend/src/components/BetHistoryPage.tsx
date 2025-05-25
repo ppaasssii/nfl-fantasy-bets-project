@@ -1,7 +1,7 @@
-// src/components/BetHistoryPage.tsx
+// frontend/src/components/BetHistoryPage.tsx
 import React, { useEffect, useState, useMemo } from 'react';
 import { supabase } from '../supabaseClient';
-import { useAuthContext } from '../App'; // Use the correct context hook for session
+import { useAuthContext } from '../App'; // Assuming AuthContext is provided via App
 import { toast } from 'react-toastify';
 
 interface BetHistorySelectionDisplay {
@@ -9,7 +9,7 @@ interface BetHistorySelectionDisplay {
     available_bets: {
         selection_name: string;
         line: number | null;
-        bet_types: { name: string; };
+        bet_types: { name: string; }; // Assuming bet_types is an object with a name property
         games: {
             home_team: string;
             away_team: string;
@@ -25,13 +25,13 @@ interface BetHistoryItemDisplay {
     potential_payout: number;
     total_odds: number;
     status: string;
-    bet_type: 'single' | 'parlay';
+    bet_type: 'single' | 'parlay'; // Keep this specific
     placed_at: string;
     user_bet_selections: BetHistorySelectionDisplay[];
 }
 
 const BetHistoryPage: React.FC = () => {
-    const { session } = useAuthContext(); // Correctly use useAuthContext
+    const { session } = useAuthContext();
     const [allBets, setAllBets] = useState<BetHistoryItemDisplay[]>([]);
     const [loading, setLoading] = useState(true);
     const [statusFilter, setStatusFilter] = useState<string>('all');
@@ -39,56 +39,52 @@ const BetHistoryPage: React.FC = () => {
 
     useEffect(() => {
         const fetchBetHistory = async () => {
-            if (session?.user) {
-                setLoading(true);
-                try {
-                    const { data, error: fetchError } = await supabase
-                        .from('user_bets')
-                        .select(`
-                            id, stake_amount, potential_payout, total_odds, status, bet_type, placed_at,
-                            user_bet_selections (
-                                odds_at_placement,
-                                available_bets (
-                                selection_name, line,
-                                bet_types (name),
-                                games (home_team, away_team, game_time, home_score, away_score)
-                                )
-                            )
-                        `)
-                        .eq('user_id', session.user.id)
-                        .order('placed_at', { ascending: false })
-                        .limit(100);
+            if (!session?.user) {
+                setAllBets([]);
+                setLoading(false);
+                return;
+            }
 
-                    if (fetchError) throw fetchError;
-                    setAllBets((data as BetHistoryItemDisplay[]) || []);
-                } catch (err: any) {
-                    console.error("Error fetching bet history:", err);
-                    toast.error(err.message || "Failed to load your bet history.");
-                    setAllBets([]);
-                } finally {
-                    setLoading(false);
-                }
-            } else {
-                setAllBets([]); // Clear bets if no session
+            setLoading(true);
+            try {
+                const { data, error: fetchError } = await supabase
+                    .from('user_bets')
+                    .select(`
+                        id, stake_amount, potential_payout, total_odds, status, bet_type, placed_at,
+                        user_bet_selections (
+                            odds_at_placement,
+                            available_bets (
+                               selection_name, line,
+                               bet_types (name),
+                               games (home_team, away_team, game_time, home_score, away_score)
+                            )
+                        )
+                    `)
+                    .eq('user_id', session.user.id)
+                    .order('placed_at', { ascending: false })
+                    .limit(100); // Consider pagination for larger histories
+
+                if (fetchError) throw fetchError;
+                setAllBets((data as BetHistoryItemDisplay[]) || []); // Cast data to the expected type
+            } catch (err: any) {
+                console.error("Error fetching bet history:", err);
+                toast.error(err.message || "Failed to load your bet history.");
+                setAllBets([]); // Clear bets on error
+            } finally {
                 setLoading(false);
             }
         };
 
-        if (session?.user) {
-            fetchBetHistory();
-        } else {
-            // If there's no session when the component mounts, ensure loading is false
-            setLoading(false);
-            setAllBets([]);
-        }
+        fetchBetHistory();
 
-    }, [session]); // Re-fetch if session changes (e.g., user logs out and back in)
+    }, [session]);
 
     const displayedBets = useMemo(() => {
         let filtered = [...allBets];
         if (statusFilter !== 'all') {
             filtered = filtered.filter(bet => bet.status === statusFilter);
         }
+        // Basic sorting
         switch (sortBy) {
             case 'stake_asc': filtered.sort((a, b) => a.stake_amount - b.stake_amount); break;
             case 'stake_desc': filtered.sort((a, b) => b.stake_amount - a.stake_amount); break;
@@ -104,8 +100,7 @@ const BetHistoryPage: React.FC = () => {
         </div>
     );
 
-    // If not loading and no session, or no session and no bets (e.g. after logout)
-    if (!session && !loading) {
+    if (!session && !loading) { // Corrected condition for "please log in"
         return (
             <div className="p-4 sm:p-6 bg-sleeper-bg-secondary rounded-xl shadow-2xl text-center">
                 <h1 className="text-2xl sm:text-3xl font-bold text-sleeper-primary mb-3 sm:mb-0">Your Bet History</h1>
@@ -113,7 +108,6 @@ const BetHistoryPage: React.FC = () => {
             </div>
         )
     }
-
 
     return (
         <div className="p-4 sm:p-6 bg-sleeper-bg-secondary rounded-xl shadow-2xl">

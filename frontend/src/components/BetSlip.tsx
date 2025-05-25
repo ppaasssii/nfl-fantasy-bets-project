@@ -1,29 +1,42 @@
-// src/components/BetSlip.tsx
+// frontend/src/components/BetSlip.tsx
 import React, { useState, useEffect } from 'react';
 import { toast } from 'react-toastify';
+import { type AvailableBetDetail } from './GameDetailPage.tsx'; // Added .tsx
 
+// This is the info the BetSlip primarily works with for display
 export interface SelectedBetDisplayInfo {
-    id: number;
+    id: number; // available_bet.id
     selection_name: string;
     odds: number;
     line: number | null;
-    bet_type_name: string;
-    home_team?: string;
-    away_team?: string;
+    bet_type_name: string; // From available_bets.bet_type.name
+    // Optional game info, might be useful for display or if onPlaceBet needs it
+    game_info?: {
+        home_team?: string;
+        away_team?: string;
+        game_time?: string;
+    };
+}
+
+// This is what the onPlaceBet function from context likely expects
+export interface BetPlacementSelection {
+    available_bet_id: number; // available_bet.id
+    // Potentially odds_at_placement if your backend wants it from client
+    // odds_at_placement: number;
 }
 
 interface BetSlipProps {
-    selectedBets: SelectedBetDisplayInfo[];
+    selectedBets: SelectedBetDisplayInfo[]; // Bets currently in the slip
     onRemoveBet: (availableBetIdToRemove: number) => void;
     onClearSlip: () => void;
     onPlaceBet: (
         stake: number,
-        selections: { available_bet_id: number }[],
+        selections: BetPlacementSelection[], // More specific type
         betType: 'single' | 'parlay'
     ) => Promise<void>;
     isPlacingBet: boolean;
-    stake: string; // Receive stake as prop
-    onStakeChange: (newStake: string) => void; // Receive stake change handler as prop
+    stake: string;
+    onStakeChange: (newStake: string) => void;
 }
 
 const BetSlip: React.FC<BetSlipProps> = ({
@@ -32,8 +45,8 @@ const BetSlip: React.FC<BetSlipProps> = ({
                                              onClearSlip,
                                              onPlaceBet,
                                              isPlacingBet,
-                                             stake,          // Use stake prop
-                                             onStakeChange,  // Use onStakeChange prop
+                                             stake,
+                                             onStakeChange,
                                          }) => {
     const [totalOdds, setTotalOdds] = useState<number>(1);
     const [potentialPayout, setPotentialPayout] = useState<number>(0);
@@ -44,8 +57,6 @@ const BetSlip: React.FC<BetSlipProps> = ({
             setTotalOdds(1);
             setPotentialPayout(0);
             setCurrentBetType('single');
-            // Note: stake is managed by parent (DashboardContent) and will be cleared there
-            // via onClearSlip -> handleClearSlip in DashboardContent
             return;
         }
 
@@ -59,23 +70,23 @@ const BetSlip: React.FC<BetSlipProps> = ({
         }
         setTotalOdds(calculatedOdds);
 
-        const numericStake = parseFloat(stake); // Use stake prop here
-        if (numericStake > 0) {
+        const numericStake = parseFloat(stake);
+        if (numericStake > 0 && calculatedOdds > 0) { // Ensure calculatedOdds is also positive
             setPotentialPayout(numericStake * calculatedOdds);
         } else {
             setPotentialPayout(0);
         }
-    }, [selectedBets, stake]); // Depend on stake prop
+    }, [selectedBets, stake]);
 
     const handleStakeInputChange = (e: React.ChangeEvent<HTMLInputElement>) => {
         const value = e.target.value;
         if (/^\d*\.?\d{0,2}$/.test(value) || value === '') {
-            onStakeChange(value); // Call parent's handler
+            onStakeChange(value);
         }
     };
 
     const handlePlaceBetClick = async () => {
-        const numericStake = parseFloat(stake); // Use stake prop
+        const numericStake = parseFloat(stake);
         if (selectedBets.length === 0) {
             toast.warn('Please add selections to your bet slip.');
             return;
@@ -84,7 +95,11 @@ const BetSlip: React.FC<BetSlipProps> = ({
             toast.warn('Please enter a valid stake amount.');
             return;
         }
-        const selectionsToPlace = selectedBets.map(b => ({ available_bet_id: b.id }));
+        // Prepare selections for the backend: just the available_bet_id
+        const selectionsToPlace: BetPlacementSelection[] = selectedBets.map(b => ({
+            available_bet_id: b.id,
+            // odds_at_placement: b.odds // Backend should re-verify odds anyway, but can pass if needed
+        }));
         await onPlaceBet(numericStake, selectionsToPlace, currentBetType);
     };
 
@@ -124,7 +139,7 @@ const BetSlip: React.FC<BetSlipProps> = ({
                             <div>
                                 <p className="font-medium text-sleeper-text-primary text-sm leading-tight">{bet.selection_name}</p>
                                 <p className="text-sleeper-text-secondary text-xs leading-tight">{bet.bet_type_name}{bet.line ? ` (${bet.line > 0 ? `+${bet.line.toFixed(1)}` : bet.line.toFixed(1)})` : ''}</p>
-                                <p className="text-indigo-400 font-semibold">Odds: {bet.odds.toFixed(2)}</p> {/* Kept indigo for odds for now, can be themed */}
+                                <p className="text-indigo-400 font-semibold">Odds: {bet.odds.toFixed(2)}</p>
                             </div>
                             <button
                                 onClick={() => onRemoveBet(bet.id)}
@@ -139,7 +154,7 @@ const BetSlip: React.FC<BetSlipProps> = ({
                 </div>
             )}
 
-            {isPlacingBet && selectedBets.length === 0 && (
+            {isPlacingBet && selectedBets.length === 0 && ( // Should not happen if placeBet clears slip on success
                 <p className="text-center text-sleeper-text-secondary py-4">Processing your bet...</p>
             )}
 
@@ -151,7 +166,7 @@ const BetSlip: React.FC<BetSlipProps> = ({
                         </label>
                         <input
                             type="text"
-                            id="stake-betslip" // Unique ID for the input
+                            id="stake-betslip"
                             value={stake}
                             onChange={handleStakeInputChange}
                             placeholder="0.00"
@@ -186,12 +201,12 @@ const BetSlip: React.FC<BetSlipProps> = ({
                     >
                         {isPlacingBet ?
                             ( <span className="flex items-center justify-center">
-                    <svg className="animate-spin -ml-1 mr-3 h-5 w-5 text-white" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
-                        <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
-                        <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
-                    </svg>
-                    Placing Bet...
-                  </span> )
+                                <svg className="animate-spin -ml-1 mr-3 h-5 w-5 text-white" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                                    <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+                                    <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                                </svg>
+                                Placing Bet...
+                              </span> )
                             : `Place ${currentBetType.charAt(0).toUpperCase() + currentBetType.slice(1)} Bet`
                         }
                     </button>
