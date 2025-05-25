@@ -1,17 +1,21 @@
 // frontend/src/components/BetHistoryPage.tsx
 import React, { useEffect, useState, useMemo } from 'react';
 import { supabase } from '../supabaseClient';
-import { useAuthContext } from '../App';
+import { useAuthContext } from '../App'; // Assuming AuthContext is provided via App
 import { toast } from 'react-toastify';
-import { americanToDecimal } from '../utils/oddsConverter'; // Import the converter
+import { americanToDecimal } from '../utils/oddsConverter'; // For displaying odds taken
 
 interface BetHistorySelectionDisplay {
-    odds_at_placement: number; // This is stored as American odd
+    odds_at_placement: number; // Stored as American odd
+    actual_stat_value_at_settlement?: number | null; // Populated by settle-bets
     available_bets: {
         selection_name: string;
         line: number | null;
-        bet_types: { name: string; };
-        games: {
+        bet_types: { // Joined from bet_types table
+            name: string;
+            api_market_key: string; // Useful for determining stat unit
+        };
+        games: { // Joined from games table
             home_team: string;
             away_team: string;
             game_time: string;
@@ -20,11 +24,12 @@ interface BetHistorySelectionDisplay {
         }
     };
 }
+
 interface BetHistoryItemDisplay {
     id: number;
     stake_amount: number;
     potential_payout: number;
-    total_odds: number; // This is stored as Decimal odd by the latest place-bet function
+    total_odds: number; // Stored as Decimal from place-bet function
     status: string;
     bet_type: 'single' | 'parlay';
     placed_at: string;
@@ -40,18 +45,31 @@ const BetHistoryPage: React.FC = () => {
 
     useEffect(() => {
         const fetchBetHistory = async () => {
-            if (!session?.user) { setAllBets([]); setLoading(false); return; }
+            if (!session?.user) {
+                setAllBets([]);
+                setLoading(false);
+                return;
+            }
+
             setLoading(true);
             try {
                 const { data, error: fetchError } = await supabase
                     .from('user_bets')
                     .select(`
-                        id, stake_amount, potential_payout, total_odds, status, bet_type, placed_at,
+                        id, 
+                        stake_amount, 
+                        potential_payout, 
+                        total_odds, 
+                        status, 
+                        bet_type, 
+                        placed_at,
                         user_bet_selections (
                             odds_at_placement,
+                            actual_stat_value_at_settlement, 
                             available_bets (
-                               selection_name, line,
-                               bet_types (name),
+                               selection_name, 
+                               line,
+                               bet_types (name, api_market_key), 
                                games (home_team, away_team, game_time, home_score, away_score)
                             )
                         )
@@ -59,25 +77,53 @@ const BetHistoryPage: React.FC = () => {
                     .eq('user_id', session.user.id)
                     .order('placed_at', { ascending: false })
                     .limit(100);
-                if (fetchError) throw fetchError;
+
+                if (fetchError) {
+                    // PGRST100 is often a syntax error in the select string
+                    console.error("Error fetching bet history (raw):", fetchError);
+                    toast.error(`Failed to load bet history: ${fetchError.message} (Code: ${fetchError.code})`);
+                    throw fetchError;
+                }
                 setAllBets((data as BetHistoryItemDisplay[]) || []);
-            } catch (err: any) { console.error("Error fetching bet history:", err); toast.error(err.message || "Failed to load bet history."); setAllBets([]);
-            } finally { setLoading(false); }
+            } catch (err: any) {
+                // This catch block will now also catch errors re-thrown from the Supabase call
+                console.error("Error in fetchBetHistory:", err);
+                if (!toast.isActive('fetchErrorToast')) { // Prevent duplicate toasts if error was already shown
+                    toast.error(err.message || "Failed to load your bet history.", { toastId: 'fetchErrorToast'});
+                }
+                setAllBets([]);
+            } finally {
+                setLoading(false);
+            }
         };
+
         fetchBetHistory();
+
     }, [session]);
 
     const displayedBets = useMemo(() => {
         let filtered = [...allBets];
-        if (statusFilter !== 'all') filtered = filtered.filter(bet => bet.status === statusFilter);
+        if (statusFilter !== 'all') {
+            filtered = filtered.filter(bet => bet.status === statusFilter);
+        }
         switch (sortBy) {
             case 'stake_asc': filtered.sort((a, b) => a.stake_amount - b.stake_amount); break;
             case 'stake_desc': filtered.sort((a, b) => b.stake_amount - a.stake_amount); break;
-            case 'placed_at_asc': filtered.sort((a, b) => new Date(a.placed_at).getTime() - new Date(b.placed_at).getTime()); break;
+            case 'placed_at_asc': filtered.sort((a,b) => new Date(a.placed_at).getTime() - new Date(b.placed_at).getTime()); break;
             default: filtered.sort((a, b) => new Date(b.placed_at).getTime() - new Date(a.placed_at).getTime()); break;
         }
         return filtered;
     }, [allBets, statusFilter, sortBy]);
+
+    const getStatUnit = (marketKey: string): string => {
+        if (!marketKey) return '';
+        const lowerMarketKey = marketKey.toLowerCase();
+        if (lowerMarketKey.includes('yards')) return ' yds';
+        if (lowerMarketKey.includes('receptions') || lowerMarketKey.includes('completions') || lowerMarketKey.includes('attempts')) return '';
+        if (lowerMarketKey.includes('touchdown') || lowerMarketKey.includes('interception') || lowerMarketKey.includes('sack') || lowerMarketKey.includes('extrapoint') || lowerMarketKey.includes('fieldgoal')) return '';
+        if (lowerMarketKey.includes('points') && !lowerMarketKey.includes('spread')) return ' pts'; // Avoid for spreads
+        return '';
+    };
 
     if (loading) return (<div className="flex justify-center items-center h-60 p-4 bg-sleeper-surface rounded-lg shadow-xl"><p className="text-sleeper-text-secondary text-lg">Loading bet history...</p></div>);
     if (!session && !loading) return (<div className="p-4 sm:p-6 bg-sleeper-bg-secondary rounded-xl shadow-2xl text-center"><h1 className="text-2xl sm:text-3xl font-bold text-sleeper-primary mb-3 sm:mb-0">Your Bet History</h1><p className="text-sleeper-text-secondary mt-4">Please log in.</p></div>);
@@ -106,7 +152,6 @@ const BetHistoryPage: React.FC = () => {
                                     <div className="mb-2 sm:mb-0 flex-grow"><p className="text-xs text-sleeper-text-secondary mb-1">ID: {bet.id} | Placed: {new Date(bet.placed_at).toLocaleString([],{year:'numeric',month:'short',day:'numeric',hour:'2-digit',minute:'2-digit'})}</p><p className="text-lg font-semibold capitalize text-sleeper-text-primary">{bet.bet_type} Bet - <span className={`font-bold ${statusTextClass}`}>{bet.status.toUpperCase()}</span></p></div>
                                     <div className="text-left sm:text-right w-full sm:w-auto mt-2 sm:mt-0 bg-sleeper-surface/80 p-3 rounded-md shadow-inner">
                                         <p className="text-sm text-sleeper-text-secondary">Stake: <span className="font-semibold text-sleeper-text-primary">${bet.stake_amount.toFixed(2)}</span></p>
-                                        {/* Display total_odds (which is stored as Decimal) */}
                                         <p className="text-sm text-sleeper-text-secondary">Odds: <span className="font-semibold text-sleeper-text-primary">{bet.total_odds.toFixed(2)}</span></p>
                                         <p className={`text-md font-semibold ${bet.status==='won'?statusTextClass:bet.status==='void'?'text-sleeper-warning':'text-sleeper-text-primary'}`}>
                                             {bet.status === 'won' ? `Won: $${bet.potential_payout.toFixed(2)}` : bet.status === 'void' ? `Refund: $${bet.stake_amount.toFixed(2)}` : `To Win: $${bet.potential_payout.toFixed(2)}`}
@@ -115,15 +160,21 @@ const BetHistoryPage: React.FC = () => {
                                 </div>
                                 <div className="mt-3 space-y-2">
                                     {bet.user_bet_selections.map((sel, index) => {
-                                        // Convert stored American odd to Decimal for display
                                         const decimalOddsTaken = americanToDecimal(sel.odds_at_placement);
+                                        const statUnit = sel.available_bets.bet_types.api_market_key ? getStatUnit(sel.available_bets.bet_types.api_market_key) : '';
+                                        const isSettledAndActualValueExists = bet.status !== 'pending' && sel.actual_stat_value_at_settlement !== null && sel.actual_stat_value_at_settlement !== undefined;
                                         return (
                                             <div key={index} className="ml-0 sm:ml-2 p-3 bg-sleeper-surface/50 rounded text-sm shadow">
                                                 <p className="text-sleeper-text-primary font-medium">{sel.available_bets.selection_name}<span className="text-sleeper-text-secondary text-xs ml-2">({sel.available_bets.bet_types.name})</span></p>
-                                                {/* Display Decimal Odds Taken */}
                                                 <p className="text-indigo-300">Odds Taken: {decimalOddsTaken.toFixed(2)}{sel.available_bets.line !== null && ` (Line: ${sel.available_bets.line > 0 ? `+${sel.available_bets.line.toFixed(1)}` : sel.available_bets.line.toFixed(1)})`}</p>
                                                 <p className="text-xs text-sleeper-text-secondary mt-1">Game: {sel.available_bets.games.away_team} @ {sel.available_bets.games.home_team}<span className="text-gray-500"> ({new Date(sel.available_bets.games.game_time).toLocaleDateString()})</span></p>
-                                                {(bet.status === 'won' || bet.status === 'lost' || bet.status === 'void') && (sel.available_bets.games.home_score != null && sel.available_bets.games.away_score != null) ? (<p className="text-xs text-sleeper-text-secondary mt-1">Final: {sel.available_bets.games.away_score ?? '-'} - {sel.available_bets.games.home_score ?? '-'}</p>): null}
+                                                {/* Display actual stat value if bet is settled and value exists */}
+                                                {isSettledAndActualValueExists && (
+                                                    <p className="text-xs text-sleeper-accent-light mt-1">
+                                                        Actual Result: {sel.actual_stat_value_at_settlement}{statUnit}
+                                                    </p>
+                                                )}
+                                                {bet.status !== 'pending' && sel.available_bets.games.home_score != null && sel.available_bets.games.away_score != null ? (<p className="text-xs text-sleeper-text-secondary mt-1">Final Score: {sel.available_bets.games.away_score ?? '-'} - {sel.available_bets.games.home_score ?? '-'}</p>): null}
                                             </div>
                                         );
                                     })}
