@@ -3,7 +3,7 @@ import React, { useEffect, useState, useCallback } from 'react';
 import { supabase } from '../supabaseClient';
 import { useAuthContext } from '../App'; // Assuming AuthContext is provided via App
 import { toast } from 'react-toastify';
-import { User } from '@supabase/supabase-js'; // Import User type
+import type { User } from '@supabase/supabase-js';
 
 interface ProfileData {
     username: string | null;
