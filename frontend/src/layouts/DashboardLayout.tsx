@@ -29,7 +29,7 @@ const DashboardLayout: React.FC = () => {
     const [stake, setStake] = useState<string>('');
     const DEFAULT_QUICK_BET_STAKE = "5.00";
 
-    const fetchProfileData = useCallback(async (isMounted: boolean) => {
+    const fetchProfileData = useCallback(async (isMounted: boolean) => { /* ... same ... */
         if (!session?.user) { if (isMounted) { setLoadingProfile(false); setFantasyBalance(null); setUsername(null); } return; }
         if(isMounted) setLoadingProfile(true);
         try {
@@ -43,7 +43,7 @@ const DashboardLayout: React.FC = () => {
         } finally { if(isMounted) setLoadingProfile(false); }
     }, [session, editingUsername]);
 
-    useEffect(() => {
+    useEffect(() => { /* ... same ... */
         let isMounted = true; fetchProfileData(isMounted);
         let profileSub: any = null;
         if (session?.user) {
@@ -56,7 +56,7 @@ const DashboardLayout: React.FC = () => {
         return () => { isMounted = false; if (profileSub) supabase.removeChannel(profileSub).catch(console.error); };
     }, [session, fetchProfileData]);
 
-    const handleUpdateUsernameSubmit = async (event: React.FormEvent<HTMLFormElement>) => {
+    const handleUpdateUsernameSubmit = async (event: React.FormEvent<HTMLFormElement>) => { /* ... same ... */
         event.preventDefault(); const trimUser = newUsernameInput.trim();
         if (!trimUser || !session?.user) { toast.warn("Username empty."); return; }
         if (trimUser === username) { setEditingUsername(false); toast.info("Username same."); return; }
@@ -68,70 +68,52 @@ const DashboardLayout: React.FC = () => {
         } catch (e: any) { toast.error(`Username update exc: ${e.message}`); }
         finally { setIsPlacingBet(wasPlacing); }
     };
-
-    const addToBetSlipHandler = useCallback((oddSelection: AvailableBetDetail | GameListSummaryBet, isQuickBet: boolean = false) => {
-        console.log('DashboardLayout: addToBetSlipHandler called with odd ID:', oddSelection.id, 'Full odd data:', oddSelection, 'Is QuickBet:', isQuickBet);
-
-        // *** MODIFIED/ROBUST bet_type_name EXTRACTION ***
-        let betTypeNameFromOdd = 'Market'; // Default fallback
-        if (oddSelection.bet_types && typeof oddSelection.bet_types.name === 'string' && oddSelection.bet_types.name.trim() !== '') {
-            betTypeNameFromOdd = oddSelection.bet_types.name;
-        } else {
-            console.warn('DashboardLayout: oddSelection.bet_types.name is missing or invalid for odd ID:', oddSelection.id, 'Using fallback name "Market". oddSelection.bet_types was:', oddSelection.bet_types);
-        }
-
-        const betToAdd: SelectedBetDisplayInfo = {
-            id: oddSelection.id,
-            selection_name: oddSelection.selection_name,
-            odds: oddSelection.odds,
-            line: oddSelection.line,
-            bet_type_name: betTypeNameFromOdd,
-            home_team: (oddSelection as AvailableBetDetail).game_info_for_slip?.home_team || (oddSelection as GameListSummaryBet).game_info_for_slip?.home_team,
-            away_team: (oddSelection as AvailableBetDetail).game_info_for_slip?.away_team || (oddSelection as GameListSummaryBet).game_info_for_slip?.away_team,
-        };
-
-        let actuallyAdded = false;
-        setSelectedBetsForSlip(prevSlip => {
-            console.log('DashboardLayout: setSelectedBetsForSlip updater. PrevSlip:', prevSlip, 'Trying to add Bet ID:', betToAdd.id);
-            if (prevSlip.find(b => b.id === betToAdd.id)) { toast.warn("Selection already in slip."); return prevSlip; }
-            if (prevSlip.length >= 10) { toast.warn("Maximum 10 selections."); return prevSlip; }
-            const decimalOddForToast = americanToDecimal(betToAdd.odds);
-            toast.success(`${betToAdd.selection_name} (${decimalOddForToast.toFixed(2)}) added to slip!`);
-            actuallyAdded = true;
-            const newSlip = [...prevSlip, betToAdd];
-            console.log('DashboardLayout: setSelectedBetsForSlip updater. New slip will be:', newSlip);
-            return newSlip;
-        });
-        if (isQuickBet && actuallyAdded) { setStake(DEFAULT_QUICK_BET_STAKE); }
+    const addToBetSlipHandler = useCallback((oddSelection: AvailableBetDetail | GameListSummaryBet, isQuickBet: boolean = false) => { /* ... same, with improved bet_type_name fallback ... */
+        console.log('DBLayout: addToBetSlip called:', oddSelection.id); let betTypeName = 'Market'; if(oddSelection.bet_types?.name && oddSelection.bet_types.name.trim() !== '') betTypeName = oddSelection.bet_types.name; else console.warn('DBLayout: bet_types.name missing for odd:',oddSelection.id);
+        const betToAdd: SelectedBetDisplayInfo = {id:oddSelection.id,selection_name:oddSelection.selection_name,odds:oddSelection.odds,line:oddSelection.line,bet_type_name:betTypeName,home_team:(oddSelection as AvailableBetDetail).game_info_for_slip?.home_team||(oddSelection as GameListSummaryBet).game_info_for_slip?.home_team,away_team:(oddSelection as AvailableBetDetail).game_info_for_slip?.away_team||(oddSelection as GameListSummaryBet).game_info_for_slip?.away_team,}; let added=false; setSelectedBetsForSlip(prev=>{if(prev.find(b=>b.id===betToAdd.id)){toast.warn("Already in slip.");return prev;}if(prev.length>=10){toast.warn("Max 10 selections.");return prev;}const decOddToast=americanToDecimal(betToAdd.odds);toast.success(`${betToAdd.selection_name}(${decOddToast.toFixed(2)}) added!`);added=true;return[...prev,betToAdd];}); if(isQuickBet&&added)setStake(DEFAULT_QUICK_BET_STAKE);
     }, [DEFAULT_QUICK_BET_STAKE, setStake]);
-
     const isOddInBetSlipHandler = (oddId: number): boolean => selectedBetsForSlip.some(b => b.id === oddId);
     const handleRemoveBetFromSlip = (id: number) => setSelectedBetsForSlip(p => p.filter(b => b.id !== id));
     const handleClearSlip = () => { setSelectedBetsForSlip([]); setStake(''); };
-    const handlePlaceBetSubmit = async (stakeToPlace:number, selectionsToSubmit:BetPlacementSelection[], betSubmitType:'single'|'parlay') => {
-        if (!session?.user) { toast.error("Not logged in."); return; }
-        if (selectionsToSubmit.length === 0) { toast.warn("Slip empty."); return; }
-        if (stakeToPlace <= 0) { toast.warn("Invalid stake."); return; }
-        setIsPlacingBet(true);
-        try {
-            const { data, error: funcErr } = await supabase.functions.invoke('place-bet', { body: { selections: selectionsToSubmit, stake_amount: stakeToPlace, bet_type: betSubmitType }});
-            if (funcErr) { toast.error(`Bet fail: ${funcErr.message}`); console.error('Place-bet func err:', funcErr); }
-            else if (data?.error) { toast.error(`Bet err: ${data.error}`); console.error('Place-bet app err:', data.error_details || data.error); }
-            else if (data?.success) { toast.success(data.message || 'Bet placed!'); handleClearSlip(); fetchProfileData(true); }
-            else { toast.error('Bet status unknown.'); console.warn('Place-bet unknown resp:', data); }
-        } catch (e: any) { toast.error(`Unexpected err: ${e.message}`); console.error('Place-bet general exc:', e); }
-        finally { setIsPlacingBet(false); }
+    const handlePlaceBetSubmit = async (stakeToPlace:number, selectionsToSubmit:BetPlacementSelection[], betSubmitType:'single'|'parlay') => { /* ... same ... */
+        if (!session?.user) { toast.error("Not logged in."); return; } if (selectionsToSubmit.length === 0) { toast.warn("Slip empty."); return; } if (stakeToPlace <= 0) { toast.warn("Invalid stake."); return; } setIsPlacingBet(true); try { const { data, error: funcErr } = await supabase.functions.invoke('place-bet', { body: { selections: selectionsToSubmit, stake_amount: stakeToPlace, bet_type: betSubmitType }}); if (funcErr) { toast.error(`Bet fail: ${funcErr.message}`); console.error('Place-bet func err:', funcErr); } else if (data?.error) { toast.error(`Bet err: ${data.error}`); console.error('Place-bet app err:', data.error_details || data.error); } else if (data?.success) { toast.success(data.message || 'Bet placed!'); handleClearSlip(); fetchProfileData(true); } else { toast.error('Bet status unknown.'); console.warn('Place-bet unknown resp:', data); }} catch (e: any) { toast.error(`Unexpected err: ${e.message}`); console.error('Place-bet general exc:', e); } finally { setIsPlacingBet(false); }
     };
 
     const dashboardContextValue: DashboardContextType = { addToBetSlip: addToBetSlipHandler, isOddInBetSlip: isOddInBetSlipHandler };
 
     return (
         <>
-            <div className="grid grid-cols-1 md:grid-cols-3 gap-6 mb-6"><div className="md:col-span-2 p-4 sm:p-6 bg-sleeper-surface rounded-xl shadow-lg border border-sleeper-border"><div className="flex justify-between items-start"><div><p className="mb-1 text-md sm:text-lg text-sleeper-text-primary">Welcome, <span className="font-semibold text-sleeper-primary">{loadingProfile ? '...' : (username || session?.user?.email)}</span>!</p></div>
-                {!editingUsername && (<button onClick={() => { setNewUsernameInput(username || session?.user?.email?.split('@')[0] || ''); setEditingUsername(true); }} className="text-xs text-sleeper-primary hover:opacity-80 underline flex-shrink-0 ml-4" title="Edit username">Edit Username</button>)}</div>
-                {editingUsername && (<form onSubmit={handleUpdateUsernameSubmit} className="mt-2 space-y-2 sm:flex sm:items-end sm:gap-2"><div className="flex-grow"><label htmlFor="edit-uname-db" className="sr-only">Edit Username</label><input id="edit-uname-db" type="text" value={newUsernameInput} onChange={(e) => setNewUsernameInput(e.target.value)} className="w-full px-3 py-1.5 text-sm bg-sleeper-bg-secondary text-primary border-sleeper-border rounded-md focus:outline-none focus:ring-sleeper-primary" placeholder="New username" disabled={isPlacingBet && editingUsername}/></div><div className="flex gap-2 mt-2 sm:mt-0 flex-shrink-0"><button type="submit" className="px-3 py-1.5 text-xs bg-sleeper-accent hover:bg-opacity-80 rounded-md text-white font-semibold disabled:opacity-50" disabled={(isPlacingBet && editingUsername) || !newUsernameInput.trim() || newUsernameInput.trim() === username}>{isPlacingBet && editingUsername ? 'Saving...' : 'Save'}</button><button type="button" onClick={() => { setEditingUsername(false); setNewUsernameInput(username || ''); }} className="px-3 py-1.5 text-xs bg-gray-600 hover:bg-gray-500 rounded-md text-white font-semibold" disabled={isPlacingBet && editingUsername}>Cancel</button></div></form>)}
-            </div><div className="p-4 sm:p-6 bg-sleeper-surface rounded-xl shadow-lg border border-sleeper-border"><h2 className="text-md sm:text-lg font-semibold mb-1 sm:mb-2 text-sleeper-text-secondary">Balance:</h2>{loadingProfile ? <p className="text-2xl sm:text-3xl font-bold text-gray-500">Loading...</p> : fantasyBalance !== null ? <p className="text-2xl sm:text-3xl font-bold text-sleeper-success">${fantasyBalance.toFixed(2)}</p> : <p className="text-2xl sm:text-3xl font-bold text-sleeper-error">N/A</p>}</div></div>
-            <div className="lg:flex lg:space-x-6"><div className="lg:w-2/3 mb-6 lg:mb-0"><Outlet context={dashboardContextValue satisfies DashboardContextType} /></div><div className="lg:w-1/3"><div className="sticky top-20"><BetSlip selectedBets={selectedBetsForSlip} onRemoveBet={handleRemoveBetFromSlip} onClearSlip={handleClearSlip} onPlaceBet={handlePlaceBetSubmit} isPlacingBet={isPlacingBet} stake={stake} onStakeChange={setStake} /></div></div></div>
+            {/* Profile Info Bar - Using new theme colors */}
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-6 mb-8"> {/* Increased mb */}
+                <div className="md:col-span-2 p-4 sm:p-6 bg-sleeper-surface-100 rounded-xl shadow-lg border border-sleeper-border">
+                    <div className="flex justify-between items-start">
+                        <div><p className="mb-1 text-md sm:text-lg text-sleeper-text-primary">Welcome, <span className="font-semibold text-sleeper-primary">{loadingProfile ? '...' : (username || session?.user?.email)}</span>!</p></div>
+                        {!editingUsername && (<button onClick={() => { setNewUsernameInput(username || session?.user?.email?.split('@')[0] || ''); setEditingUsername(true); }} className="text-xs text-sleeper-primary hover:opacity-80 underline flex-shrink-0 ml-4" title="Edit username">Edit Username</button>)}
+                    </div>
+                    {editingUsername && ( /* Form styling uses theme colors */
+                        <form onSubmit={handleUpdateUsernameSubmit} className="mt-2 space-y-2 sm:flex sm:items-end sm:gap-2">
+                            <div className="flex-grow"><label htmlFor="edit-uname-db" className="sr-only">Edit Username</label><input id="edit-uname-db" type="text" value={newUsernameInput} onChange={(e) => setNewUsernameInput(e.target.value)} className="w-full px-3 py-1.5 text-sm bg-sleeper-bg text-sleeper-text-primary border-sleeper-border rounded-md focus:outline-none ring-offset-sleeper-surface-100 focus:ring-2 focus:ring-sleeper-primary" placeholder="New username" disabled={isPlacingBet && editingUsername}/></div>
+                            <div className="flex gap-2 mt-2 sm:mt-0 flex-shrink-0"><button type="submit" className="px-3 py-1.5 text-xs bg-sleeper-accent hover:bg-sleeper-accent-hover rounded-md text-sleeper-text-on-accent font-semibold disabled:opacity-50" disabled={(isPlacingBet && editingUsername) || !newUsernameInput.trim() || newUsernameInput.trim() === username}>{isPlacingBet && editingUsername ? 'Saving...' : 'Save'}</button><button type="button" onClick={() => { setEditingUsername(false); setNewUsernameInput(username || ''); }} className="px-3 py-1.5 text-xs bg-sleeper-surface-200 hover:bg-sleeper-border rounded-md text-sleeper-text-secondary font-semibold" disabled={isPlacingBet && editingUsername}>Cancel</button></div>
+                        </form>
+                    )}
+                </div>
+                <div className="p-4 sm:p-6 bg-sleeper-surface-100 rounded-xl shadow-lg border border-sleeper-border">
+                    <h2 className="text-md sm:text-lg font-semibold mb-1 sm:mb-2 text-sleeper-text-secondary">Balance:</h2>
+                    {loadingProfile ? <p className="text-2xl sm:text-3xl font-bold text-gray-500">Loading...</p> : fantasyBalance !== null ? <p className="text-2xl sm:text-3xl font-bold text-sleeper-success">${fantasyBalance.toFixed(2)}</p> : <p className="text-2xl sm:text-3xl font-bold text-sleeper-error">N/A</p>}
+                </div>
+            </div>
+
+            {/* Main Content Area */}
+            <div className="lg:flex lg:space-x-6">
+                <div className="lg:w-2/3 mb-6 lg:mb-0"> {/* Main content like GameList or GameDetailPage */}
+                    <Outlet context={dashboardContextValue satisfies DashboardContextType} />
+                </div>
+                <div className="lg:w-1/3"> {/* BetSlip Area */}
+                    <div className="sticky top-20"> {/* Adjust top based on header height */}
+                        <BetSlip selectedBets={selectedBetsForSlip} onRemoveBet={handleRemoveBetFromSlip} onClearSlip={handleClearSlip} onPlaceBet={handlePlaceBetSubmit} isPlacingBet={isPlacingBet} stake={stake} onStakeChange={setStake} />
+                    </div>
+                </div>
+            </div>
         </>
     );
 };
