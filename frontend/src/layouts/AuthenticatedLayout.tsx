@@ -1,5 +1,5 @@
 // frontend/src/layouts/AuthenticatedLayout.tsx
-import React, { useState } from 'react';
+
 import { supabase } from '../supabaseClient';
 import { Navigate, Link, Outlet, useNavigate, NavLink, useLocation } from 'react-router-dom';
 import { toast } from 'react-toastify';
@@ -63,7 +63,7 @@ const AuthenticatedLayout = ({ session, setSession }: {
                                             src="/logo.jpeg" // REPLACE THIS with your actual logo path
                                             alt="FantasyBets Logo"
                                         />
-                                        <span className="hidden md:block text-2xl sm:text-3xl font-black tracking-tighter text-sleeper-primary transition-colors group-hover:text-sleeper-primary-hover">
+                                        <span className="hidden md:block text-2xl sm:text-2xl font-black tracking-tighter text-sleeper-text-primary transition-colors group-hover:text-sleeper-primary-hover">
                                             FantasyBets
                                         </span>
                                     </Link>
