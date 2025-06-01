@@ -151,5 +151,5 @@ const AuthenticatedLayout = ({ session, setSession }: {
             </footer>
         </div>
     );
-};
+};//INT branching
 export default AuthenticatedLayout;
