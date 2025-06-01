@@ -72,12 +72,15 @@ interface ProcessedBetCategory {
 }
 
 const extractPlayerNameForGrouping = (selectionName: string, betTypeName: string): string | undefined => {
-    if (!betTypeName.toLowerCase().includes('player')) return undefined;
+    if (!betTypeName.toLowerCase().includes('player') && !selectionName.toLowerCase().includes('player')) {
+        return undefined;
+    }
     const lcSelection = selectionName.toLowerCase();
     const keywords = [
-        ' points', ' rebounds', ' assists', ' touchdowns', ' receiving yards', ' rushing yards', ' passing yards',
-        ' over', ' under', ' yes', ' no', ' to score', ' first touchdown scorer', ' last touchdown scorer',
-        ' player to record'
+        ' points', ' rebounds', ' assists', ' touchdowns', ' receiving yards',
+        ' rushing yards', ' passing yards', ' over/under', ' over', ' under',
+        ' yes', ' no', ' to score', ' first td scorer', ' last td scorer',
+        ' made 3s', ' made threes', 'fantasy score'
     ];
     let shortestKeywordIndex = -1;
     let extractedName = selectionName;
@@ -101,7 +104,7 @@ const extractPlayerNameForGrouping = (selectionName: string, betTypeName: string
         }
         return undefined;
     }
-    return extractedName;
+    return extractedName && extractedName.length > 2 ? extractedName : undefined;
 };
 
 
@@ -117,7 +120,6 @@ const GameDetailPage: React.FC = () => {
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState<string | null>(null);
     const [currentTime, setCurrentTime] = useState(new Date());
-    // KORREKTUR: State-Variable und Setter konsistent verwenden
     const [visiblePlayerPropsCount, setVisiblePlayerPropsCount] = useState<Record<string, number>>({});
 
     useEffect(() => {
@@ -141,7 +143,7 @@ const GameDetailPage: React.FC = () => {
                 .order('bet_type_id').order('line', { nullsFirst: true }).order('selection_name');
             if (betsError) throw betsError;
 
-            const rawCategories: Record<string, {
+            const rawCategoriesData: Record<string, {
                 displayName: string;
                 marketsData: Record<string, AvailableBetDetail[]>;
                 icon?: React.ElementType;
@@ -153,18 +155,29 @@ const GameDetailPage: React.FC = () => {
                 player_passing_yards: { displayName: "Passing Yards", marketsData: {} },
                 player_rushing_yards: { displayName: "Rushing Yards", marketsData: {} },
                 player_receiving_yards: { displayName: "Receiving Yards", marketsData: {} },
-                other_player_props: { displayName: "Other Player Props", marketsData: {} },
+                other_player_props: { displayName: "Other Player Bets", marketsData: {} }, // Umbenannt
                 other: { displayName: "Other Bets", marketsData: {} }
             };
+
+            const uniqueBetTracker: Record<string, Set<string>> = {};
 
             availableBetsData?.forEach(bet => {
                 if (!bet.bet_types) return;
                 const betType = bet.bet_types as BetTypeInterface;
                 const extractedPlayer = extractPlayerNameForGrouping(bet.selection_name, betType.name);
 
+                let currentSelectionName = bet.selection_name;
+                if (!extractedPlayer && betType.api_market_key !== 'h2h' && betType.api_market_key !== 'spreads' && betType.api_market_key !== 'totals') {
+                    currentSelectionName = currentSelectionName.replace(/\bHome Team\b/gi, gameData.home_team).replace(/\bAway Team\b/gi, gameData.away_team);
+                }
+
                 const enrichedBet: AvailableBetDetail = {
-                    ...bet, bet_type_name: betType.name, home_team: gameData.home_team,
-                    away_team: gameData.away_team, bet_type_api_key: betType.api_market_key,
+                    ...bet,
+                    selection_name: currentSelectionName,
+                    bet_type_name: betType.name,
+                    home_team: gameData.home_team,
+                    away_team: gameData.away_team,
+                    bet_type_api_key: betType.api_market_key,
                     player_name: extractedPlayer
                 };
 
@@ -177,77 +190,108 @@ const GameDetailPage: React.FC = () => {
                 else if (enrichedBet.player_name) {
                     const btNameLower = betType.name.toLowerCase();
                     if (btNameLower.includes('touchdown')) determinedCategoryKey = 'player_touchdowns';
-                    else if (btNameLower.includes('pass') && btNameLower.includes('yard')) determinedCategoryKey = 'player_passing_yards';
-                    else if (btNameLower.includes('rush') && btNameLower.includes('yard')) determinedCategoryKey = 'player_rushing_yards';
-                    else if (btNameLower.includes('receiv') && btNameLower.includes('yard')) determinedCategoryKey = 'player_receiving_yards';
+                    else if (btNameLower.includes('passing yards')) determinedCategoryKey = 'player_passing_yards';
+                    else if (btNameLower.includes('rushing yards')) determinedCategoryKey = 'player_rushing_yards';
+                    else if (btNameLower.includes('receiving yards')) determinedCategoryKey = 'player_receiving_yards';
                     else determinedCategoryKey = 'other_player_props';
                     groupName = enrichedBet.player_name;
                 }
 
-                if (!rawCategories[determinedCategoryKey]) {
-                    rawCategories[determinedCategoryKey] = { displayName: betType.name, marketsData: {} };
+                if (!rawCategoriesData[determinedCategoryKey]) {
+                    rawCategoriesData[determinedCategoryKey] = { displayName: betType.name, marketsData: {} };
                 }
-                if (!rawCategories[determinedCategoryKey].marketsData[groupName]) {
-                    rawCategories[determinedCategoryKey].marketsData[groupName] = [];
+                if (!rawCategoriesData[determinedCategoryKey].marketsData[groupName]) {
+                    rawCategoriesData[determinedCategoryKey].marketsData[groupName] = [];
                 }
-                rawCategories[determinedCategoryKey].marketsData[groupName].push(enrichedBet);
+
+                const betSignature = `${enrichedBet.selection_name}_${enrichedBet.odds}_${enrichedBet.line ?? 'noln'}`;
+                const groupTrackerKey = `${determinedCategoryKey}_${groupName}`;
+                if (!uniqueBetTracker[groupTrackerKey]) {
+                    uniqueBetTracker[groupTrackerKey] = new Set<string>();
+                }
+
+                if (determinedCategoryKey === 'h2h') { // Spezielle Deduplizierung für Winner-Wetten
+                    const existingBetForSelection = rawCategoriesData[determinedCategoryKey].marketsData[groupName].find(
+                        b => b.selection_name === enrichedBet.selection_name
+                    );
+                    if (existingBetForSelection) {
+                        if (americanToDecimal(enrichedBet.odds) < americanToDecimal(existingBetForSelection.odds)) {
+                            // Ersetze mit der schlechteren Quote (niedrigerer Dezimalwert)
+                            const index = rawCategoriesData[determinedCategoryKey].marketsData[groupName].indexOf(existingBetForSelection);
+                            rawCategoriesData[determinedCategoryKey].marketsData[groupName][index] = enrichedBet;
+                            // Update signature im Tracker (obwohl es für h2h wahrscheinlich nur eine Signatur pro Team geben sollte)
+                            uniqueBetTracker[groupTrackerKey].delete(`${existingBetForSelection.selection_name}_${existingBetForSelection.odds}_${existingBetForSelection.line ?? 'noln'}`);
+                            uniqueBetTracker[groupTrackerKey].add(betSignature);
+                        }
+                        // ansonsten ignoriere die neue Wette (die bessere Quote für den User)
+                    } else if (!uniqueBetTracker[groupTrackerKey].has(betSignature)) { // Sollte für h2h nur einmal pro Team eintreten
+                        rawCategoriesData[determinedCategoryKey].marketsData[groupName].push(enrichedBet);
+                        uniqueBetTracker[groupTrackerKey].add(betSignature);
+                    }
+                } else if (!uniqueBetTracker[groupTrackerKey].has(betSignature)) { // Standard-Deduplizierung für andere
+                    rawCategoriesData[determinedCategoryKey].marketsData[groupName].push(enrichedBet);
+                    uniqueBetTracker[groupTrackerKey].add(betSignature);
+                }
             });
 
-            const finalProcessedCategories: ProcessedBetCategory[] = Object.entries(rawCategories)
+            const finalProcessedCategories: ProcessedBetCategory[] = Object.entries(rawCategoriesData)
                 .map(([key, categoryData]) => {
                     const markets: MarketGroup[] = Object.entries(categoryData.marketsData)
                         .map(([marketGroupName, options]) => {
                             if (key.includes('player_touchdowns')) {
-                                options.sort((a: AvailableBetDetail, b: AvailableBetDetail) => a.odds - b.odds); // Typen hinzugefügt
+                                options.sort((a: AvailableBetDetail, b: AvailableBetDetail) => a.odds - b.odds);
                             } else {
-                                options.sort((a: AvailableBetDetail, b: AvailableBetDetail) => { // Typen hinzugefügt
+                                options.sort((a: AvailableBetDetail, b: AvailableBetDetail) => {
                                     if (a.selection_name.toLowerCase().startsWith('over ')) return -1;
                                     if (b.selection_name.toLowerCase().startsWith('over ')) return 1;
                                     return a.selection_name.localeCompare(b.selection_name);
                                 });
                             }
 
+                            let isOverUnder = false;
+                            let overOpt: AvailableBetDetail | undefined = undefined;
+                            let underOpt: AvailableBetDetail | undefined = undefined;
+                            let commonLn: number | null = null;
+
                             if ((key === 'totals' || key.includes('yards')) && options.length >= 2) {
-                                const overOption = options.find(o => o.selection_name.toLowerCase().startsWith('over '));
-                                const underOption = options.find(o => o.selection_name.toLowerCase().startsWith('under '));
-                                // Stelle sicher, dass opt1.line nicht undefined ist, bevor es in Set verwendet wird
-                                if (overOption && underOption && (overOption.line === underOption.line || (overOption.line == null && underOption.line == null))) {
-                                    return {
-                                        groupName: marketGroupName, options: [],
-                                        isOverUnderPair: true, overOption, underOption,
-                                        commonLine: overOption.line === undefined ? null : overOption.line // undefined zu null
-                                    };
+                                overOpt = options.find(o => o.selection_name.toLowerCase().startsWith('over '));
+                                underOpt = options.find(o => o.selection_name.toLowerCase().startsWith('under '));
+                                if (overOpt && underOpt && (overOpt.line === underOpt.line || (overOpt.line == null && underOpt.line == null))) {
+                                    isOverUnder = true;
+                                    commonLn = overOpt.line === undefined ? null : overOpt.line;
                                 }
                             }
-                            return { groupName: marketGroupName, options };
+                            return {
+                                groupName: marketGroupName,
+                                options: isOverUnder ? [] : options, // Optionen leeren, wenn als Paar behandelt
+                                isOverUnderPair: isOverUnder,
+                                overOption: overOpt,
+                                underOption: underOpt,
+                                commonLine: commonLn
+                            };
                         })
                         .filter(market => market.options.length > 0 || market.isOverUnderPair);
 
                     return {
                         categoryKey: key,
                         displayName: categoryData.displayName,
-                        markets: markets.sort((a: MarketGroup, b: MarketGroup) => a.groupName.localeCompare(b.groupName)), // Typen hinzugefügt
+                        markets: markets.sort((a: MarketGroup, b: MarketGroup) => a.groupName.localeCompare(b.groupName)),
                         icon: categoryData.icon
                     };
                 })
                 .filter(category => category.markets.length > 0)
-                .sort((a: ProcessedBetCategory, b: ProcessedBetCategory) => { // Typen hinzugefügt
-                    const order = ['Winner', 'Spread', 'Total', 'Touchdowns', 'Passing Yards', 'Rushing Yards', 'Receiving Yards', 'Other Player Props', 'Other Bets'];
-                    const indexA = order.indexOf(a.displayName);
-                    const indexB = order.indexOf(b.displayName);
+                .sort((a: ProcessedBetCategory, b: ProcessedBetCategory) => {
+                    const order = ['Winner', 'Spread', 'Total', 'Touchdowns', 'Passing Yards', 'Rushing Yards', 'Receiving Yards', 'Other Player Bets', 'Other Bets'];
+                    const indexA = order.indexOf(a.displayName); const indexB = order.indexOf(b.displayName);
                     if (indexA !== -1 && indexB !== -1) return indexA - indexB;
-                    if (indexA !== -1) return -1;
-                    if (indexB !== -1) return 1;
+                    if (indexA !== -1) return -1; if (indexB !== -1) return 1;
                     return a.displayName.localeCompare(b.displayName);
                 });
 
             setProcessedBetCategories(finalProcessedCategories);
 
-        } catch (e: any) {
-            console.error("Error fetching game details:", e);
-            setError(e.message || "Failed to load game details.");
-            toast.error(e.message || "Could not fetch game details.");
-        } finally { setLoading(false); }
+        } catch (e: any) { console.error("Error fetching game details:", e); setError(e.message); toast.error(e.message); }
+        finally { setLoading(false); }
     }, [dbGameId]);
 
     useEffect(() => { fetchGameDetails(); }, [fetchGameDetails]);
@@ -277,17 +321,15 @@ const GameDetailPage: React.FC = () => {
     const renderOddButton = (odd: AvailableBetDetail, displayName: string, isGameBettingClosed: boolean) => {
         const isSelected = isOddInBetSlip ? isOddInBetSlip(odd.id) : false;
         const decimalOddForDisplay = americanToDecimal(odd.odds);
-        let lineDisplay = "";
-        if (odd.line != null && (displayName.toLowerCase().startsWith('over') || displayName.toLowerCase().startsWith('under') || odd.bet_type_api_key === 'spreads')) {
-            lineDisplay = `${odd.line > 0 ? '+' : ''}${odd.line.toFixed(1)}`;
+
+        let displayLineText = "";
+        // Zeige Linie nur für Spread-Wetten direkt am Button
+        if (odd.bet_type_api_key === 'spreads' && odd.line != null) {
+            displayLineText = ` (${odd.line > 0 ? '+' : ''}${odd.line.toFixed(1)})`;
         }
-        let finalDisplayName = displayName;
-        if (lineDisplay && (displayName.toLowerCase().startsWith('over') || displayName.toLowerCase().startsWith('under'))) {
-            finalDisplayName = displayName.split(' ')[0];
-        } else if (lineDisplay && odd.bet_type_api_key === 'spreads' && game) { // game hinzugefügt für Zugriff auf home_team/away_team
-            finalDisplayName = displayName.replace(lineDisplay, '').replace(game.home_team || '', '').replace(game.away_team || '', '').trim();
-            if (finalDisplayName === '') finalDisplayName = (displayName.includes(game.home_team || '')) ? 'Home' : 'Away';
-        }
+        // Für O/U Wetten wird die Linie im Gruppenheader angezeigt, daher hier nicht wiederholen,
+        // außer der displayName ist sehr generisch und braucht Kontext.
+        // Aktuell wird für O/U Paare der displayName schon als "Over" / "Under" übergeben.
 
         return (
             <button
@@ -295,20 +337,19 @@ const GameDetailPage: React.FC = () => {
                 onClick={() => handleBetSelection(odd)}
                 disabled={isGameBettingClosed}
                 className={`w-full flex items-center justify-between p-2.5 rounded-md border text-center transition-colors duration-150 focus:outline-none focus-visible:ring-2 focus-visible:ring-sleeper-primary focus-visible:ring-offset-2 focus-visible:ring-offset-sleeper-surface
-                    ${isGameBettingClosed
-                    ? 'bg-gray-700/40 border-gray-600 text-gray-400 cursor-not-allowed opacity-70'
-                    : isSelected
-                        ? 'bg-sleeper-primary text-white border-sleeper-primary shadow-md'
+                    ${isGameBettingClosed ? 'bg-gray-700/40 border-gray-600 text-gray-400 cursor-not-allowed opacity-70'
+                    : isSelected ? 'bg-sleeper-primary text-white border-sleeper-primary shadow-md'
                         : 'bg-sleeper-surface-200 text-sleeper-text-primary border-sleeper-border hover:border-sleeper-primary/70 hover:bg-sleeper-primary/10'
                 }`}
                 title={isGameBettingClosed ? "Betting closed" : (isSelected ? `Remove "${odd.selection_name}" from slip` : `Add "${odd.selection_name}" to slip`)}
             >
-                <span className="text-sm font-medium truncate text-left mr-2">{finalDisplayName} {lineDisplay && <span className="text-xs text-sleeper-text-secondary/90">{lineDisplay}</span>}</span>
-                <span className="text-sm font-bold">{decimalOddForDisplay.toFixed(2)}</span>
+                <span className="text-xs sm:text-sm font-medium truncate text-left mr-2">{displayName}{displayLineText}</span>
+                <span className="text-sm sm:text-base font-bold">{decimalOddForDisplay.toFixed(2)}</span>
             </button>
         );
     };
 
+    // Lade-, Fehler- und Fallback-Zustände
     if (loading) {
         return ( <div className="text-center py-10"> <ArrowPathIcon className="animate-spin h-8 w-8 text-sleeper-primary mx-auto mb-3" /> <p className="text-lg font-semibold text-sleeper-text-primary">Loading Game Details...</p> </div> );
     }
@@ -319,6 +360,7 @@ const GameDetailPage: React.FC = () => {
         return ( <div className="text-center py-10"> <NoSymbolIcon className="h-10 w-10 text-sleeper-text-secondary mx-auto mb-3" /> <p className="text-xl font-semibold text-sleeper-text-primary">Game not found.</p> </div> );
     }
 
+    // Spielstatus-Logik für die Detailseite
     const gameStartTime = new Date(game.game_time);
     const isFinalBackend = game.status === 'finished' || game.status === 'FT' || game.status === 'Final';
     const isLiveBackend = game.status === 'live' || game.status === 'inprogress';
@@ -340,29 +382,21 @@ const GameDetailPage: React.FC = () => {
                 Back
             </button>
 
+            {/* Game Header */}
             <div className="bg-sleeper-surface p-3 sm:p-4 rounded-lg shadow-md mb-4 sm:mb-6 border border-sleeper-border/60">
                 <div className="flex flex-col sm:flex-row justify-between items-start">
                     <div className="mb-2 sm:mb-0 flex-grow">
                         <h1 className="text-base sm:text-lg font-bold text-sleeper-text-primary" title={`${game.away_team} @ ${game.home_team}`}>
                             {game.away_team} <span className="text-sleeper-text-secondary/70 mx-0.5 sm:mx-1">@</span> {game.home_team}
                         </h1>
-                        <p className="text-xs sm:text-sm text-sleeper-text-secondary mt-0.5 flex items-center">
-                            <CalendarDaysIcon className="h-3.5 w-3.5 mr-1.5 text-sleeper-text-secondary/70 flex-shrink-0" />
+                        <p className="text-xs text-sleeper-text-secondary mt-0.5 flex items-center">
+                            <CalendarDaysIcon className="h-4 w-4 mr-1.5 text-sleeper-text-secondary/70 flex-shrink-0" />
                             {formatGameTime(game.game_time)}
                         </p>
                     </div>
                     <div className="flex-shrink-0 flex flex-col items-end space-y-1.5 mt-2 sm:mt-0">
-                        {statusLabelText && (
-                            <span className={`flex items-center text-xxs font-bold px-1.5 py-px sm:px-2 sm:py-0.5 rounded-full shadow-sm ${statusLabelClasses}`}>
-                                {StatusIcon && <StatusIcon className="h-2.5 w-2.5 sm:h-3 sm:w-3 mr-0.5 sm:mr-1" />}
-                                {statusLabelText}
-                            </span>
-                        )}
-                        {(game.home_score != null && game.away_score != null && (isFinalBackend || isLiveBackend || isClientSideBlocked)) && (
-                            <div className="text-lg sm:text-xl font-bold text-sleeper-text-primary whitespace-nowrap">
-                                {game.away_score} - {game.home_score}
-                            </div>
-                        )}
+                        {statusLabelText && ( <span className={`flex items-center text-xxs font-bold px-1.5 py-px sm:px-2 sm:py-0.5 rounded-full shadow-sm ${statusLabelClasses}`}> {StatusIcon && <StatusIcon className="h-2.5 w-2.5 sm:h-3 sm:w-3 mr-0.5 sm:mr-1" />} {statusLabelText} </span> )}
+                        {(game.home_score != null && game.away_score != null && (isFinalBackend || isLiveBackend || isClientSideBlocked)) && ( <div className="text-lg sm:text-xl font-bold text-sleeper-text-primary whitespace-nowrap"> {game.away_score} - {game.home_score} </div> )}
                     </div>
                 </div>
             </div>
@@ -370,7 +404,7 @@ const GameDetailPage: React.FC = () => {
             {isBettingEffectivelyClosed && !isFinalBackend && (
                 <div className="mb-4 p-3 bg-orange-600/10 border border-orange-600/30 text-orange-200 rounded-lg text-xs sm:text-sm flex items-center justify-center">
                     <LockClosedIcon className="h-4 w-4 sm:h-5 sm:w-5 mr-2 flex-shrink-0"/>
-                    Betting is currently suspended as the game is live or about to start.
+                    Betting is currently suspended for this game.
                 </div>
             )}
 
@@ -382,6 +416,7 @@ const GameDetailPage: React.FC = () => {
                 </div>
             )}
 
+            {/* Tabs und Wettmärkte */}
             {processedBetCategories.length > 0 && (
                 <Tab.Group>
                     <Tab.List className="flex space-x-1 sm:space-x-1.5 rounded-lg bg-sleeper-surface-200 p-1 border border-sleeper-border mb-3 sm:mb-4 overflow-x-auto custom-scrollbar">
@@ -399,46 +434,55 @@ const GameDetailPage: React.FC = () => {
                         {processedBetCategories.map((category) => (
                             <Tab.Panel key={category.categoryKey} className="space-y-2.5 sm:space-y-3 outline-none">
                                 {category.markets.map((market, marketIdx) => {
-                                    const initialVisibleCount = (category.categoryKey.includes('player_') && !market.isOverUnderPair) ? 3 : market.options.length;
-                                    const currentVisible = visiblePlayerPropsCount[market.groupName + marketIdx] || initialVisibleCount; // KORREKTUR
-                                    const canShowMore = market.options.length > initialVisibleCount && currentVisible < market.options.length;
+                                    const initialVisibleCount = (category.categoryKey.includes('player_') && !market.isOverUnderPair) ? 5 : (market.options?.length || 0);
+                                    const currentVisible = visiblePlayerPropsCount[market.groupName + marketIdx] || initialVisibleCount;
+                                    const canShowMore = market.options && market.options.length > initialVisibleCount && currentVisible < market.options.length;
 
                                     return (
-                                        <Disclosure key={market.groupName + marketIdx} defaultOpen={category.markets.length === 1 || market.isOverUnderPair || market.groupName.toLowerCase().includes('game') || category.displayName === 'Winner' || category.displayName === 'Spread' || category.displayName === 'Total' || category.categoryKey.includes('player_')}>
+                                        <Disclosure key={market.groupName + marketIdx} defaultOpen={
+                                            category.markets.length === 1 || // Wenn nur ein Markt in der Kategorie, öffne ihn
+                                            market.isOverUnderPair ||        // Over/Under Paare immer offen
+                                            market.groupName.toLowerCase().includes('game') || // "Game Lines" etc. offen
+                                            category.displayName === 'Winner' ||
+                                            category.displayName === 'Spread' ||
+                                            category.displayName === 'Total' ||
+                                            category.categoryKey.includes('player_') // Spieler-Props initial offen
+                                        }>
                                             {({ open }) => (
                                                 <div className="bg-sleeper-surface-200/40 p-0.5 rounded-lg border border-sleeper-border/30">
                                                     <Disclosure.Button className="flex justify-between w-full px-3 py-3 text-left text-sm font-semibold text-sleeper-text-primary hover:bg-sleeper-surface-300/50 rounded-md focus:outline-none focus-visible:ring focus-visible:ring-sleeper-primary focus-visible:ring-opacity-75">
-                                                        <span>{market.groupName}</span>
+                                                        <span>
+                                                            {market.groupName}
+                                                            {market.isOverUnderPair && market.commonLine != null && (category.categoryKey === 'totals' || category.categoryKey.includes('yards')) && (
+                                                                <span className="text-xs text-sleeper-text-secondary ml-1.5">(Line: {market.commonLine.toFixed(1)})</span>
+                                                            )}
+                                                        </span>
                                                         <ChevronUpIcon className={`${open ? 'rotate-180' : ''} w-5 h-5 text-sleeper-text-secondary group-hover:text-sleeper-primary transition-transform`} />
                                                     </Disclosure.Button>
                                                     <Disclosure.Panel className="px-1.5 py-2 sm:px-2 text-sm">
                                                         {market.isOverUnderPair && market.overOption && market.underOption ? (
-                                                            <div className="space-y-1.5">
-                                                                {market.commonLine != null && (
-                                                                    <div className="text-center text-xs text-sleeper-text-secondary mb-1">
-                                                                        Line: <span className="font-semibold">{market.commonLine.toFixed(1)}</span>
-                                                                    </div>
-                                                                )}
-                                                                <div className="grid grid-cols-2 gap-2">
-                                                                    {renderOddButton(market.overOption, `Over ${market.commonLine?.toFixed(1)}`, isBettingEffectivelyClosed)}
-                                                                    {renderOddButton(market.underOption, `Under ${market.commonLine?.toFixed(1)}`, isBettingEffectivelyClosed)}
-                                                                </div>
+                                                            <div className="grid grid-cols-2 gap-2">
+                                                                {renderOddButton(market.overOption, `Over`, isBettingEffectivelyClosed)}
+                                                                {renderOddButton(market.underOption, `Under`, isBettingEffectivelyClosed)}
                                                             </div>
-                                                        ) : market.options.length > 0 ? (
+                                                        ) : market.options && market.options.length > 0 ? (
                                                             <div className="space-y-1.5">
                                                                 {market.options.slice(0, currentVisible).map(odd => {
                                                                     let displayName = odd.selection_name;
                                                                     if (market.groupName === odd.player_name && odd.player_name) {
                                                                         displayName = displayName.replace(odd.player_name, '').trim();
-                                                                        if (displayName.toLowerCase().startsWith('over') || displayName.toLowerCase().startsWith('under')) {
-                                                                            displayName = `${displayName.split(' ')[0]} ${odd.line ? odd.line.toFixed(1) : ''}`.trim();
+                                                                        // Für Spieler O/U Yards, zeige "Over"/"Under" + Linie
+                                                                        if (category.categoryKey.includes('yards') && (displayName.toLowerCase().startsWith('over') || displayName.toLowerCase().startsWith('under'))) {
+                                                                            displayName = `${displayName.split(' ')[0]}`; // Linie wird im Button via displayLine angezeigt
                                                                         }
+                                                                    } else if (category.categoryKey === 'spreads') {
+                                                                        displayName = odd.selection_name;
                                                                     }
                                                                     return renderOddButton(odd, displayName || odd.selection_name, isBettingEffectivelyClosed);
                                                                 })}
                                                                 {canShowMore && (
                                                                     <button
-                                                                        onClick={() => setVisiblePlayerPropsCount((prev: Record<string, number>) => ({...prev, [market.groupName + marketIdx]: market.options.length}))} // KORREKTUR
+                                                                        onClick={() => setVisiblePlayerPropsCount((prev: Record<string, number>) => ({...prev, [market.groupName + marketIdx]: market.options.length}))}
                                                                         className="mt-2.5 w-full text-xs text-sleeper-primary hover:text-sleeper-primary-hover font-semibold py-2 rounded-md bg-sleeper-surface hover:bg-sleeper-surface-200/70"
                                                                     >
                                                                         Show All ({market.options.length})
