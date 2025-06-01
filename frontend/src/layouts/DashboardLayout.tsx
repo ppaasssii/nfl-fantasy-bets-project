@@ -3,10 +3,9 @@ import React, { useState, useCallback, useEffect, useMemo } from 'react';
 import { Outlet } from 'react-router-dom';
 import { supabase } from '../supabaseClient';
 import { toast } from 'react-toastify';
-import { useAuthContext } from '../App'; // Stellt sicher, dass der Pfad zu App.tsx korrekt ist
+import { useAuthContext } from '../App';
 
 import BetSlip, { type SelectedBetDisplayInfo, type BetPlacementSelection } from '../components/BetSlip';
-// Importiere die Typen, die von GameList und GameDetailPage exportiert werden
 import type { GameForListV2, QuickBetOption } from '../components/GameList';
 import type { AvailableBetDetail as GameDetailAvailableBet } from '../components/GameDetailPage';
 
@@ -14,6 +13,7 @@ import { Dialog } from '@headlessui/react';
 import { TicketIcon, XMarkIcon, UserCircleIcon, WalletIcon } from '@heroicons/react/24/outline';
 
 export interface DashboardContextType {
+    // Die Signatur von addToBetSlip bleibt void, da wir die Logik in GameList.tsx anpassen
     addToBetSlip: (odd: GameDetailAvailableBet | QuickBetOption, gameContext: GameForListV2) => void;
     removeFromBetSlip: (oddId: number) => void;
     isOddInBetSlip: (oddId: number) => boolean;
@@ -28,7 +28,7 @@ const DashboardLayout: React.FC = () => {
 
     const [selectedBetsForSlip, setSelectedBetsForSlip] = useState<SelectedBetDisplayInfo[]>([]);
     const [isPlacingBet, setIsPlacingBet] = useState(false);
-    const [stake, setStake] = useState<string>('');
+    const [stake, setStake] = useState<string>('2');
     const [isBetSlipModalOpen, setIsBetSlipModalOpen] = useState(false);
 
     const fetchProfileAndBalance = useCallback(async () => {
@@ -55,11 +55,11 @@ const DashboardLayout: React.FC = () => {
 
     useEffect(() => { fetchProfileAndBalance(); }, [fetchProfileAndBalance]);
 
-    const getBetTypeNameFromApiKey = (apiKey: string): string => { // Erwartet string
+    const getBetTypeNameFromApiKey = (apiKey: string): string => {
         if (apiKey === 'h2h') return 'WINNER';
         if (apiKey === 'spreads') return 'Spread';
         if (apiKey === 'totals') return 'Total';
-        return 'Bet'; // Fallback
+        return 'Bet';
     };
 
     const handleAddOrUpdateBetInSlip = useCallback((
@@ -69,19 +69,15 @@ const DashboardLayout: React.FC = () => {
         const existingBetIndex = selectedBetsForSlip.findIndex(bet => bet.id === newOdd.id);
         let betToAdd: SelectedBetDisplayInfo;
         let betTypeName = "Unknown Bet Type";
-
-        // Typsichere Ableitung von betTypeName
         const apiKey = newOdd.bet_type_api_key;
 
-        if (apiKey && typeof apiKey === 'string') { // Sicherstellen, dass apiKey ein nicht-leerer String ist
+        if (apiKey && typeof apiKey === 'string') {
             betTypeName = getBetTypeNameFromApiKey(apiKey);
         } else if ('bet_type_name' in newOdd && typeof newOdd.bet_type_name === 'string') {
-            // Fallback, falls bet_type_api_key fehlt (sollte nicht passieren, wenn Typen korrekt sind)
-            // und newOdd ist GameDetailAvailableBet (das hat bet_type_name)
             betTypeName = newOdd.bet_type_name;
         } else {
             console.warn("Could not determine bet_type_name from newOdd:", newOdd);
-            betTypeName = "Bet"; // Generischer Fallback
+            betTypeName = "Bet";
         }
 
         betToAdd = {
@@ -97,9 +93,11 @@ const DashboardLayout: React.FC = () => {
         if (existingBetIndex > -1) {
             setSelectedBetsForSlip(prev => prev.filter(bet => bet.id !== newOdd.id));
             toast.info(`"${betToAdd.selection_name}" removed from slip.`, { autoClose: 2000 });
+            // Kein Rückgabewert mehr benötigt, da die Logik in GameList liegt
         } else {
             setSelectedBetsForSlip(prev => [...prev, betToAdd]);
             toast.success(`"${betToAdd.selection_name}" added to slip!`, { autoClose: 2000 });
+            // Kein Rückgabewert mehr benötigt
         }
     }, [selectedBetsForSlip]);
 
@@ -110,44 +108,60 @@ const DashboardLayout: React.FC = () => {
 
     const handleClearSlip = useCallback(() => {
         setSelectedBetsForSlip([]);
-        setStake('');
+        setStake('2');
         toast.info("Slip cleared.", { autoClose: 1500 });
     }, []);
 
     const handlePlaceBetSubmit = useCallback(async (
-        currentStake: number,
+        totalStakeFromSlip: number,
         selectionsToPlace: BetPlacementSelection[],
         betTypeToPlace: 'single' | 'parlay'
     ) => {
-        if (!session?.user || selectionsToPlace.length === 0 || currentStake <= 0) {
-            toast.error("Invalid bet details."); return;
+        if (!session?.user || selectionsToPlace.length === 0 || totalStakeFromSlip <= 0) {
+            toast.error("Invalid bet details. Check stake and selections.");
+            return;
         }
-        // Guthabenprüfung wurde in BetSlip.tsx verschoben, hier nur der Aufruf
+        if (fantasyBalance !== null && totalStakeFromSlip > fantasyBalance) {
+            toast.error("Total stake exceeds your available balance.");
+            return;
+        }
         setIsPlacingBet(true);
-        try {
-            const { data, error } = await supabase.functions.invoke('place-bet', {
-                body: { stake_amount: currentStake, selections: selectionsToPlace, bet_type: betTypeToPlace },
-            });
-            if (error) {
-                console.error("Error placing bet (network/invoke):", error);
-                toast.error(`Bet failed: ${error.message || 'Network error'}`);
-            } else if (data?.error) {
-                console.error("Error from place-bet function:", data.error);
-                toast.error(`Bet failed: ${data.error}`);
-            } else {
-                toast.success(data.message || "Bet placed!");
-                setSelectedBetsForSlip([]);
-                setStake('');
-                fetchProfileAndBalance();
-                setIsBetSlipModalOpen(false);
+        if (betTypeToPlace === 'single' && selectionsToPlace.length > 0) {
+            let allSucceeded = true;
+            let successfulBetsCount = 0;
+            const stakePerSingleBet = selectionsToPlace.length > 0 ? totalStakeFromSlip / selectionsToPlace.length : 0;
+            if (stakePerSingleBet < 0.01 && selectionsToPlace.length > 0) {
+                toast.error(`Stake per individual bet ($${stakePerSingleBet.toFixed(2)}) is too low.`);
+                setIsPlacingBet(false);
+                return;
             }
-        } catch (e: any) {
-            console.error("Unexpected error during bet placement:", e);
-            toast.error("Unexpected error placing bet.");
-        } finally {
-            setIsPlacingBet(false);
+            for (const selection of selectionsToPlace) {
+                try {
+                    const { data, error } = await supabase.functions.invoke('place-bet', {
+                        body: { stake_amount: stakePerSingleBet, selections: [selection], bet_type: 'single' },
+                    });
+                    if (error) { allSucceeded = false; console.error(`Error placing single bet for selection ${selection.available_bet_id}:`, error); toast.error(`Bet on selection failed: ${error.message || 'Network error'}`);
+                    } else if (data?.error) { allSucceeded = false; console.error(`Error from place-bet function for selection ${selection.available_bet_id}:`, data.error); toast.error(`Bet on selection failed: ${data.error}`);
+                    } else { successfulBetsCount++; }
+                } catch (e: any) { allSucceeded = false; console.error(`Unexpected error during single bet placement for selection ${selection.available_bet_id}:`, e); toast.error("An unexpected error occurred placing a single bet."); }
+            }
+            if (allSucceeded && successfulBetsCount === selectionsToPlace.length) { toast.success(`${successfulBetsCount} single bet(s) placed successfully!`);
+            } else if (successfulBetsCount > 0) { toast.warn(`${successfulBetsCount} out of ${selectionsToPlace.length} single bets placed. Some failed.`);
+            } else { toast.error("All single bets failed to place."); }
+            setSelectedBetsForSlip([]); setStake('2'); fetchProfileAndBalance(); setIsBetSlipModalOpen(false);
+        } else if (betTypeToPlace === 'parlay') {
+            try {
+                const { data, error } = await supabase.functions.invoke('place-bet', {
+                    body: { stake_amount: totalStakeFromSlip, selections: selectionsToPlace, bet_type: 'parlay' },
+                });
+                if (error) { throw error; }
+                if (data?.error) { throw new Error(data.error); }
+                toast.success(data.message || "Combi bet placed successfully!");
+                setSelectedBetsForSlip([]); setStake('2'); fetchProfileAndBalance(); setIsBetSlipModalOpen(false);
+            } catch (e: any) { console.error("Error placing combi bet:", e); toast.error(`Combi bet placement failed: ${e.message || 'Please try again.'}`); }
         }
-    }, [session, fetchProfileAndBalance]); // fantasyBalance hier nicht mehr zwingend als Abhängigkeit nötig, da Check in BetSlip
+        setIsPlacingBet(false);
+    }, [session, fetchProfileAndBalance, fantasyBalance]);
 
     const dashboardContextValue = useMemo(() => ({
         addToBetSlip: handleAddOrUpdateBetInSlip,
@@ -192,7 +206,7 @@ const DashboardLayout: React.FC = () => {
                             isPlacingBet={isPlacingBet}
                             stake={stake}
                             onStakeChange={setStake}
-                            fantasyBalance={fantasyBalance} // Weiterhin für die Anzeige im BetSlip und die Button-Deaktivierung benötigt
+                            fantasyBalance={fantasyBalance}
                         />
                     </div>
                 </div>
@@ -211,9 +225,9 @@ const DashboardLayout: React.FC = () => {
             )}
 
             <Dialog open={isBetSlipModalOpen} onClose={() => setIsBetSlipModalOpen(false)} className="relative z-50 lg:hidden">
-                <div className="fixed inset-0 bg-black/40 backdrop-blur-sm" aria-hidden="true" />
+                <div className="fixed inset-0 bg-black/60 backdrop-blur-sm" aria-hidden="true" />
                 <div className="fixed inset-0 flex items-center justify-center p-4">
-                    <Dialog.Panel className="w-full max-w-lg rounded-xl bg-sleeper-surface-100 shadow-2xl border border-sleeper-border flex flex-col overflow-hidden" style={{maxHeight: '90vh'}}>
+                    <Dialog.Panel className="w-full max-w-lg rounded-xl bg-sleeper-surface shadow-2xl border border-sleeper-border flex flex-col overflow-hidden" style={{maxHeight: '90vh'}}>
                         <div className="flex justify-between items-center p-4 border-b border-sleeper-border">
                             <Dialog.Title className="text-lg font-semibold text-sleeper-text-primary">Your Bet Slip</Dialog.Title>
                             <button onClick={() => setIsBetSlipModalOpen(false)} className="text-sleeper-text-secondary hover:text-sleeper-text-primary p-1 rounded-full hover:bg-sleeper-surface-200 transition-colors" aria-label="Close bet slip">
@@ -230,7 +244,7 @@ const DashboardLayout: React.FC = () => {
                                 stake={stake}
                                 onStakeChange={setStake}
                                 isMobileView={true}
-                                fantasyBalance={fantasyBalance} // Weiterhin für die Anzeige im BetSlip und die Button-Deaktivierung benötigt
+                                fantasyBalance={fantasyBalance}
                             />
                         </div>
                     </Dialog.Panel>
