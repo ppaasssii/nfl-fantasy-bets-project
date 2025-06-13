@@ -1,5 +1,5 @@
 // src/components/GameList.tsx
-import React, { useEffect, useState, useCallback } from 'react';
+import React, { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { supabase } from '../supabaseClient';
 import { CalendarDaysIcon, ArrowPathIcon, InboxIcon, ExclamationTriangleIcon } from '@heroicons/react/24/outline';
@@ -57,6 +57,8 @@ const GameCard: React.FC<GameCardProps> = ({ initialGame }) => {
 
     const formatSpreadLine = (line: number | null | undefined) => line ? (line > 0 ? `+${line}` : `${line}`) : '';
     const getMoneylineLabel = (option?: { display_name: string }) => option?.display_name || ' ';
+
+    // KORREKTUR: Die ungenutzte Variable 'gameContextForBetSlip' wurde entfernt.
 
     return (
         <div className="bg-sleeper-surface rounded-lg shadow-md border border-sleeper-border/60 overflow-hidden">

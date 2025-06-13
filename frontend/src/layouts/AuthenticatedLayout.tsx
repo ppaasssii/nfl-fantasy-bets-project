@@ -1,19 +1,20 @@
 // src/layouts/AuthenticatedLayout.tsx
 import React, { useState, useCallback, useEffect } from 'react';
-import { Outlet, useNavigate, useLocation, Link, NavLink } from 'react-router-dom';
+import { Outlet, useNavigate, Link, NavLink } from 'react-router-dom';
 import { supabase } from '../supabaseClient';
 import { toast } from 'react-toastify';
 import { ArrowLeftOnRectangleIcon, HomeIcon, ListBulletIcon, UserCircleIcon, TicketIcon, XMarkIcon, UserGroupIcon } from '@heroicons/react/24/outline';
 import BottomNavigationBar from '../components/BottomNavigationBar';
 import BetSlip from '../components/BetSlip';
-import { type QuickBetOption, type BetSlipOdd, type BetPlacementSelection } from '../types';
+import { type BetOption, type BetSlipOdd, type BetPlacementSelection, type GameDetails } from '../types';
 import { type Session } from '@supabase/supabase-js';
 import { type AppContextType } from '../App';
 
+// Diese Hilfsfunktion formatiert die Namen für den Wettschein
 const generateBetSlipSelectionName = (
-    odd: QuickBetOption,
+    odd: BetOption,
     marketName: string,
-    gameContext: { home_team: string; away_team: string; home_team_abbr: string; away_team_abbr: string; },
+    gameContext: GameDetails,
     playerName?: string
 ): string => {
     if (typeof marketName !== 'string') {
@@ -25,19 +26,19 @@ const generateBetSlipSelectionName = (
         return `${playerName} - ${cleanMarketName} ${odd.display_name}`;
     }
     if (marketName.includes("Points")) {
-        const team = marketName.replace(" Points", "");
-        return `${team} Points ${odd.display_name}`;
+        return `${marketName} ${odd.display_name}`;
     }
     switch (marketName) {
-        case 'Moneyline':
-            const teamName = odd.display_name.toLowerCase() === gameContext.home_team_abbr.toLowerCase()
+        case 'Moneyline': { // KORREKTUR: Code in Case-Block gekapselt
+            const teamName = odd.display_name?.toLowerCase() === gameContext.home_team_abbr.toLowerCase()
                 ? gameContext.home_team
                 : gameContext.away_team;
             return `Winner: ${teamName}`;
+        }
         case 'Point Spread':
             return odd.display_name;
         default:
-            return odd.display_name || marketName;
+            return odd.display_name;
     }
 };
 
@@ -47,7 +48,7 @@ const AuthenticatedLayout: React.FC<{
     setSession: (session: Session | null) => void;
 }> = ({ session, setSession }) => {
     const navigate = useNavigate();
-    const location = useLocation();
+    // KORREKTUR: ungenutzte 'location' entfernt
     const [loadingProfile, setLoadingProfile] = useState(true);
     const [fantasyBalance, setFantasyBalance] = useState<number | null>(null);
     const [selectedBets, setSelectedBets] = useState<BetSlipOdd[]>([]);
@@ -68,14 +69,15 @@ const AuthenticatedLayout: React.FC<{
         fetchProfile();
         const changes = supabase.channel(`profiles-balance-listener-${session.user.id}`)
             .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'profiles', filter: `id=eq.${session.user.id}` }, payload => {
-                setFantasyBalance((payload.new as { fantasy_balance: number }).fantasy_balance);
+                const newProfile = payload.new as { fantasy_balance: number };
+                setFantasyBalance(newProfile.fantasy_balance);
             }).subscribe();
         return () => { supabase.removeChannel(changes).catch(console.error); };
     }, [fetchProfile, session.user.id]);
 
     const addToBetSlip = useCallback((
-        odd: QuickBetOption,
-        gameContext: { id: number; home_team: string; away_team: string; home_team_abbr: string; away_team_abbr: string; },
+        odd: BetOption,
+        gameContext: GameDetails,
         marketName: string,
         playerName?: string,
     ) => {
@@ -93,10 +95,14 @@ const AuthenticatedLayout: React.FC<{
                 odds_at_placement: odd.odds,
                 line: odd.line ?? null,
                 bet_type_name: marketName.replace(/_/g, ' '),
-                game_info_for_slip: gameContext
+                game_info_for_slip: { // KORREKTUR: Nur die benötigten Felder werden übergeben
+                    id: gameContext.id,
+                    home_team: gameContext.home_team,
+                    away_team: gameContext.away_team,
+                    home_team_abbr: gameContext.home_team_abbr,
+                    away_team_abbr: gameContext.away_team_abbr,
+                }
             };
-
-            // KORREKTUR: Die Logik zum automatischen Öffnen wurde entfernt.
             return [...prev, newBet];
         });
         if (selectedBets.length === 0) {
@@ -116,12 +122,18 @@ const AuthenticatedLayout: React.FC<{
         setIsPlacingBet(true);
         try {
             const { error, data } = await supabase.functions.invoke('place-bet', { body: { selections: selectionsToPlace, stake_amount: stakeAmount, bet_type: betType } });
-            const functionError = (data as any)?.error || error;
+            const functionError = (data as { error?: { message: string }})?.error;
             if (functionError) { throw new Error(functionError.message || 'Bet placement failed.'); }
+            if (error) throw error;
             toast.success('Bet placed successfully!');
             clearBetSlip();
             await fetchProfile();
-        } catch (error: any) { toast.error(error.message);
+        } catch (err: unknown) { // KORREKTUR: Typsichere Fehlerbehandlung
+            if (err instanceof Error) {
+                toast.error(err.message);
+            } else {
+                toast.error("An unknown error occurred during bet placement.");
+            }
         } finally { setIsPlacingBet(false); }
     };
 

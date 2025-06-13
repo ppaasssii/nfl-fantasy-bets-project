@@ -1,11 +1,12 @@
 // src/components/OddButton.tsx
 import React from 'react';
-import { type QuickBetOption } from '../types';
-import { useAppOutletContext } from '../App';
+// KORREKTUR: 'QuickBetOption' wird zu 'BetOption'
+import { type BetOption, type GameDetails } from '../types';
+import { useAppOutletContext } from '../hooks';
 
 interface OddButtonProps {
-    option?: QuickBetOption;
-    game: { id: number; home_team: string; away_team: string; home_team_abbr: string; away_team_abbr: string; };
+    option?: BetOption;
+    game: GameDetails; // KORREKTUR: Erwartet jetzt das volle GameDetails Objekt
     marketName: string;
     lineLabel: React.ReactNode;
     playerName?: string;
@@ -15,15 +16,13 @@ interface OddButtonProps {
 const OddButton: React.FC<OddButtonProps> = ({ option, game, marketName, lineLabel, playerName, className = '' }) => {
     const { addToBetSlip, isOddInBetSlip } = useAppOutletContext();
 
-    // KORREKTUR: Ist keine gültige Option vorhanden, wird der Button deaktiviert sein
     const isDisabled = !option || typeof option.odds !== 'number';
 
     const handleQuickBetClick = (e: React.MouseEvent) => {
         e.stopPropagation();
-        if (isDisabled) return; // Sicherheitsabfrage
+        if (isDisabled || !option) return;
 
-        // Da wir hier sicher sind, dass 'option' existiert, können wir es sicher verwenden
-        addToBetSlip(option!, game, marketName, playerName);
+        addToBetSlip(option, game, marketName, playerName);
     };
 
     if (isDisabled) {

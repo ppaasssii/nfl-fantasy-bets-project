@@ -6,7 +6,7 @@ import { toast } from 'react-toastify';
 import { Tab } from '@headlessui/react';
 import { ArrowLeftIcon, ArrowPathIcon, ExclamationTriangleIcon } from '@heroicons/react/24/outline';
 import OddButton from './OddButton';
-import { type GameDetails, type Market, type AvailableBetDetail, type StructuredPlayerProps } from '../types';
+import { type GameDetails, type Market, type StructuredPlayerProps } from '../types';
 
 const groupPlayerMarkets = (markets: Market[]): StructuredPlayerProps => {
     const props: StructuredPlayerProps = {
@@ -17,6 +17,7 @@ const groupPlayerMarkets = (markets: Market[]): StructuredPlayerProps => {
         if (!market.player_name) return;
         const playerName = market.player_name;
 
+        // Initialisiere die Objekte für jeden Spieler, falls sie noch nicht existieren
         if (!props.touchdowns[playerName]) {
             props.touchdowns[playerName] = { anytime: { yes: null, no: null }, first: { yes: null, no: null } };
         }
@@ -24,18 +25,24 @@ const groupPlayerMarkets = (markets: Market[]): StructuredPlayerProps => {
         if (!props.rushing_yards[playerName]) props.rushing_yards[playerName] = { over: null, under: null };
         if (!props.receiving_yards[playerName]) props.receiving_yards[playerName] = { over: null, under: null };
 
-        const yardageTypes = ['passing yards', 'rushing yards', 'receiving yards'];
-        const yardageKeyMap = { 'passing yards': 'passing_yards', 'rushing yards': 'rushing_yards', 'receiving yards': 'receiving_yards' };
-
-        yardageTypes.forEach(type => {
-            if (market.market_name.toLowerCase().includes(type)) {
-                const key = yardageKeyMap[type as keyof typeof yardageKeyMap];
-                props[key][playerName].over = market.options.find(o => o.api_side_id === 'over') || props[key][playerName].over;
-                props[key][playerName].under = market.options.find(o => o.api_side_id === 'under') || props[key][playerName].under;
-            }
-        });
-
         const marketNameLower = market.market_name.toLowerCase();
+
+        // Yardage Props
+        if (marketNameLower.includes('passing yards')) {
+            const key = 'passing_yards';
+            props[key][playerName].over = market.options.find(o => o.api_side_id === 'over') || props[key][playerName].over;
+            props[key][playerName].under = market.options.find(o => o.api_side_id === 'under') || props[key][playerName].under;
+        } else if (marketNameLower.includes('rushing yards')) {
+            const key = 'rushing_yards';
+            props[key][playerName].over = market.options.find(o => o.api_side_id === 'over') || props[key][playerName].over;
+            props[key][playerName].under = market.options.find(o => o.api_side_id === 'under') || props[key][playerName].under;
+        } else if (marketNameLower.includes('receiving yards')) {
+            const key = 'receiving_yards';
+            props[key][playerName].over = market.options.find(o => o.api_side_id === 'over') || props[key][playerName].over;
+            props[key][playerName].under = market.options.find(o => o.api_side_id === 'under') || props[key][playerName].under;
+        }
+
+        // Touchdowns
         if (marketNameLower.includes('any touchdowns')) {
             props.touchdowns[playerName].anytime.yes = market.options.find(o => o.api_side_id === 'yes') || props.touchdowns[playerName].anytime.yes;
             props.touchdowns[playerName].anytime.no = market.options.find(o => o.api_side_id === 'no') || props.touchdowns[playerName].anytime.no;
@@ -64,10 +71,12 @@ const GameDetailPage: React.FC = () => {
                 if (rpcError) throw rpcError;
                 if (!data) throw new Error("Game not found or failed to load.");
                 setGame(data);
-            } catch (e: any) {
-                console.error('Error fetching game details:', e);
-                toast.error("Could not load game details.");
-                setError("Failed to load game details.");
+            } catch (e) {
+                if (e instanceof Error) {
+                    console.error('Error fetching game details:', e);
+                    toast.error("Could not load game details.");
+                    setError("Failed to load game details.");
+                }
             } finally { setLoading(false); }
         };
         fetchGameDetails();
@@ -81,9 +90,10 @@ const GameDetailPage: React.FC = () => {
 
     const gameLineMarkets = useMemo(() => {
         if (!game || !game.bet_categories) return { spreadMarket: null, moneylineMarket: null, totalMarket: null, homePointsMarket: null, awayPointsMarket: null };
+
         const relevantCategories = ['Main', 'Total', 'Team Props', 'Game Lines', 'Winner'];
         const gameMarkets = game.bet_categories
-            .filter(c => relevantCategories.includes(c.main_category))
+            .filter(c => c && relevantCategories.includes(c.main_category))
             .flatMap(c => c.markets || []);
 
         return {
@@ -102,6 +112,8 @@ const GameDetailPage: React.FC = () => {
 
     const formatSpreadLine = (line: number | null | undefined) => line ? (line > 0 ? `+${line}` : `${line}`) : '';
 
+    const TABS_ORDER = ['Game', 'Passing', 'Rushing', 'Receiving', 'Touchdowns'];
+
     return (
         <div className="space-y-6">
             <Link to="/" className="inline-flex items-center text-sm font-medium text-sleeper-text-secondary hover:text-sleeper-primary transition-colors">
@@ -117,7 +129,7 @@ const GameDetailPage: React.FC = () => {
                 <div className="relative">
                     <div className="overflow-x-auto custom-scrollbar pb-2">
                         <Tab.List className="flex space-x-1 sm:space-x-2 rounded-xl bg-sleeper-surface p-1 min-w-max">
-                            {['Game', 'Passing', 'Rushing', 'Receiving', 'Touchdowns'].map(tabName => (
+                            {TABS_ORDER.map(tabName => (
                                 <Tab key={tabName} as={Fragment}>
                                     {({ selected }) => (
                                         <button className={`w-full px-3 sm:px-4 rounded-lg py-2.5 text-sm font-medium leading-5 transition-colors duration-200 focus:outline-none focus-visible:ring-2 ring-offset-2 ring-offset-sleeper-bg ring-white/60 ${selected ? 'bg-sleeper-primary text-white shadow' : 'text-sleeper-text-secondary hover:bg-sleeper-surface-200 hover:text-sleeper-text-primary'}`}>
@@ -130,7 +142,6 @@ const GameDetailPage: React.FC = () => {
                     </div>
                 </div>
                 <Tab.Panels className="mt-2">
-                    {/* Game Tab */}
                     <Tab.Panel className="rounded-xl bg-sleeper-surface-100 p-2 sm:p-3 space-y-2">
                         <div className="grid grid-cols-[1fr_repeat(3,minmax(80px,1fr))] gap-x-2 sm:gap-x-3 text-xs uppercase font-bold text-sleeper-text-secondary text-center mb-1">
                             <div className="text-left">Team</div>
@@ -162,28 +173,58 @@ const GameDetailPage: React.FC = () => {
                         </div>
                     </Tab.Panel>
 
-                    {/* Player Prop Panels */}
-                    {(['passing_yards', 'rushing_yards', 'receiving_yards'] as const).map(propType => (
-                        <Tab.Panel key={propType} className="rounded-xl bg-sleeper-surface-100 p-2 sm:p-3 space-y-px">
-                            <div className="grid grid-cols-[1fr_repeat(2,minmax(90px,1fr))] gap-x-2 sm:gap-x-3 text-xs uppercase font-bold text-sleeper-text-secondary text-center p-2">
-                                <div className="text-left">Player</div>
-                                <div>Over</div>
-                                <div>Under</div>
-                            </div>
-                            {structuredProps && Object.entries(structuredProps[propType])
-                                .filter(([, props]) => props.over || props.under)
-                                .map(([playerName, props]) => (
-                                    <div key={playerName} className="grid grid-cols-[1fr_repeat(2,minmax(90px,1fr))] gap-x-2 sm:gap-x-3 items-center bg-sleeper-surface-200 p-2 rounded-md min-h-[56px]">
-                                        <p className="font-bold text-sleeper-text-primary text-sm sm:text-base break-words">{playerName}</p>
-                                        <OddButton game={game} option={props.over || undefined} marketName={propType} playerName={playerName} lineLabel={props.over?.display_name || '-'} />
-                                        <OddButton game={game} option={props.under || undefined} marketName={propType} playerName={playerName} lineLabel={props.under?.display_name || '-'} />
-                                    </div>
-                                ))}
-                        </Tab.Panel>
-                    ))}
+                    <Tab.Panel key="Passing" className="rounded-xl bg-sleeper-surface-100 p-2 sm:p-3 space-y-px">
+                        <div className="grid grid-cols-[1fr_repeat(2,minmax(90px,1fr))] gap-x-2 sm:gap-x-3 text-xs uppercase font-bold text-sleeper-text-secondary text-center p-2">
+                            <div className="text-left">Player</div>
+                            <div>Over</div>
+                            <div>Under</div>
+                        </div>
+                        {structuredProps && Object.entries(structuredProps.passing_yards)
+                            .filter(([, props]) => props.over || props.under)
+                            .map(([playerName, props]) => (
+                                <div key={playerName} className="grid grid-cols-[1fr_repeat(2,minmax(90px,1fr))] gap-x-2 sm:gap-x-3 items-center bg-sleeper-surface-200 p-2 rounded-md min-h-[56px]">
+                                    <p className="font-bold text-sleeper-text-primary text-sm sm:text-base break-words">{playerName}</p>
+                                    <OddButton game={game} option={props.over || undefined} marketName="passing_yards" playerName={playerName} lineLabel={props.over?.display_name || '-'} />
+                                    <OddButton game={game} option={props.under || undefined} marketName="passing_yards" playerName={playerName} lineLabel={props.under?.display_name || '-'} />
+                                </div>
+                            ))}
+                    </Tab.Panel>
 
-                    {/* Touchdowns Panel */}
-                    <Tab.Panel className="rounded-xl bg-sleeper-surface-100 p-2 sm:p-3 space-y-px">
+                    <Tab.Panel key="Rushing" className="rounded-xl bg-sleeper-surface-100 p-2 sm:p-3 space-y-px">
+                        <div className="grid grid-cols-[1fr_repeat(2,minmax(90px,1fr))] gap-x-2 sm:gap-x-3 text-xs uppercase font-bold text-sleeper-text-secondary text-center p-2">
+                            <div className="text-left">Player</div>
+                            <div>Over</div>
+                            <div>Under</div>
+                        </div>
+                        {structuredProps && Object.entries(structuredProps.rushing_yards)
+                            .filter(([, props]) => props.over || props.under)
+                            .map(([playerName, props]) => (
+                                <div key={playerName} className="grid grid-cols-[1fr_repeat(2,minmax(90px,1fr))] gap-x-2 sm:gap-x-3 items-center bg-sleeper-surface-200 p-2 rounded-md min-h-[56px]">
+                                    <p className="font-bold text-sleeper-text-primary text-sm sm:text-base break-words">{playerName}</p>
+                                    <OddButton game={game} option={props.over || undefined} marketName="rushing_yards" playerName={playerName} lineLabel={props.over?.display_name || '-'} />
+                                    <OddButton game={game} option={props.under || undefined} marketName="rushing_yards" playerName={playerName} lineLabel={props.under?.display_name || '-'} />
+                                </div>
+                            ))}
+                    </Tab.Panel>
+
+                    <Tab.Panel key="Receiving" className="rounded-xl bg-sleeper-surface-100 p-2 sm:p-3 space-y-px">
+                        <div className="grid grid-cols-[1fr_repeat(2,minmax(90px,1fr))] gap-x-2 sm:gap-x-3 text-xs uppercase font-bold text-sleeper-text-secondary text-center p-2">
+                            <div className="text-left">Player</div>
+                            <div>Over</div>
+                            <div>Under</div>
+                        </div>
+                        {structuredProps && Object.entries(structuredProps.receiving_yards)
+                            .filter(([, props]) => props.over || props.under)
+                            .map(([playerName, props]) => (
+                                <div key={playerName} className="grid grid-cols-[1fr_repeat(2,minmax(90px,1fr))] gap-x-2 sm:gap-x-3 items-center bg-sleeper-surface-200 p-2 rounded-md min-h-[56px]">
+                                    <p className="font-bold text-sleeper-text-primary text-sm sm:text-base break-words">{playerName}</p>
+                                    <OddButton game={game} option={props.over || undefined} marketName="receiving_yards" playerName={playerName} lineLabel={props.over?.display_name || '-'} />
+                                    <OddButton game={game} option={props.under || undefined} marketName="receiving_yards" playerName={playerName} lineLabel={props.under?.display_name || '-'} />
+                                </div>
+                            ))}
+                    </Tab.Panel>
+
+                    <Tab.Panel key="Touchdowns" className="rounded-xl bg-sleeper-surface-100 p-2 sm:p-3 space-y-px">
                         <div className="grid grid-cols-[1fr_repeat(2,1fr)] gap-x-2 sm:gap-x-3 text-xs uppercase font-bold text-sleeper-text-secondary text-center p-2">
                             <div className="text-left">Player</div>
                             <div>Anytime</div>
