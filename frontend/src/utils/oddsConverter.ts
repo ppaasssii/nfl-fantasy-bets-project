@@ -1,27 +1,27 @@
 // frontend/src/utils/oddsConverter.ts
-export function americanToDecimal(americanOdds: number): number {
-    if (americanOdds > 0) { // For positive odds (e.g., +150)
+
+/**
+ * Konvertiert amerikanische Quoten (z.B. -110 oder +200) in Dezimalquoten (z.B. 1.91 oder 3.00).
+ * @param americanOdds - Die amerikanische Quote als Zahl.
+ * @returns Die Dezimalquote.
+ */
+export const americanToDecimal = (americanOdds: number): number => {
+    if (americanOdds > 0) {
         return (americanOdds / 100) + 1;
-    } else if (americanOdds < 0) { // For negative odds (e.g., -200)
+    }
+    if (americanOdds < 0) {
         return (100 / Math.abs(americanOdds)) + 1;
     }
-    // Should not happen with valid American odds (which are non-zero)
-    // but as a fallback, return 1 (meaning no change to stake, or an invalid odd)
-    console.warn(`Invalid American odd received for conversion: ${americanOdds}`);
+    // Sollte nicht vorkommen, aber als Fallback
     return 1;
-}
+};
 
-// Calculates total return (stake + profit)
-export function calculatePotentialPayout(stake: number, decimalOdds: number): number {
-    if (stake <= 0 || decimalOdds <= 1) { // decimalOdds <= 1 means no profit or loss
-        return stake; // At worst, return the stake if odds are 1 (push) or less
-    }
+/**
+ * Berechnet den potenziellen Gesamtgewinn (Einsatz + Reingewinn).
+ * @param stake - Der gesetzte Betrag.
+ * @param decimalOdds - Die Dezimalquote der Wette.
+ * @returns Der potenzielle Auszahlungsbetrag.
+ */
+export const calculatePotentialPayout = (stake: number, decimalOdds: number): number => {
     return stake * decimalOdds;
-}
-
-// Calculates just the profit
-export function calculateProfit(stake: number, decimalOdds: number): number {
-    const payout = calculatePotentialPayout(stake, decimalOdds);
-    if (payout === stake) return 0; // If payout is just the stake back (e.g. odds of 1.0)
-    return payout - stake;
-}
+};

@@ -1,37 +1,37 @@
-// src/components/GameList.tsx
-import React, { useEffect, useState, useCallback } from 'react';
+// src/components/GameCard.tsx
+import React, { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { supabase } from '../supabaseClient';
-import { CalendarDaysIcon, ArrowPathIcon, InboxIcon, ExclamationTriangleIcon } from '@heroicons/react/24/outline';
+import { CalendarDaysIcon } from '@heroicons/react/24/outline';
 import OddButton from './OddButton';
-import { type GameDetails } from '../types';
+import { type GameDetails, type GameForListV2 } from '../types';
 
 interface GameCardProps {
-    initialGame: { id: number; game_time: string; };
+    gameId: number;
 }
 
-const GameCard: React.FC<GameCardProps> = ({ initialGame }) => {
+const GameCard: React.FC<GameCardProps> = ({ gameId }) => {
     const navigate = useNavigate();
     const [game, setGame] = useState<GameDetails | null>(null);
 
     useEffect(() => {
         const fetchGameData = async () => {
-            const { data, error } = await supabase.rpc('get_game_details_v9', { p_game_id: initialGame.id });
+            const { data, error } = await supabase.rpc('get_game_details_v8', { p_game_id: gameId });
             if (error) {
-                console.error(`Error fetching details for game ${initialGame.id}:`, error);
+                console.error(`Error fetching details for game ${gameId}:`, error);
             } else {
                 setGame(data);
             }
         };
         fetchGameData();
-    }, [initialGame.id]);
+    }, [gameId]);
 
     const handleCardClick = (e: React.MouseEvent) => {
         if ((e.target as HTMLElement).closest('button')) {
             e.stopPropagation();
             return;
         }
-        navigate(`/game/${initialGame.id}`);
+        navigate(`/game/${gameId}`);
     };
 
     if (!game) {
@@ -44,7 +44,7 @@ const GameCard: React.FC<GameCardProps> = ({ initialGame }) => {
 
     const { home_team, away_team, home_team_abbr, away_team_abbr, bet_categories } = game;
 
-    const gameMarkets = bet_categories?.filter(c => ['Main', 'Total', 'Team Props', 'Game Lines', 'Winner'].includes(c.main_category)).flatMap(c => c.markets || []) || [];
+    const gameMarkets = bet_categories?.find(c => c.main_category.startsWith('Game'))?.markets || [];
     const moneylineMarket = gameMarkets.find(m => m.market_name === 'Moneyline' || m.market_name === 'Winner');
     const spreadMarket = gameMarkets.find(m => m.market_name === 'Point Spread');
     const homePointsMarket = gameMarkets.find(m => m.market_name === `${home_team} Points`);
@@ -82,14 +82,14 @@ const GameCard: React.FC<GameCardProps> = ({ initialGame }) => {
                             <p className="font-bold text-sleeper-text-primary text-sm sm:text-base">{data.team}</p>
                         </div>
                         <div className="flex items-center">
-                            <OddButton game={game} option={data.spread?.options.find(o => o.api_side_id === data.side)} marketName="Point Spread" lineLabel={formatSpreadLine(data.spread?.options.find(o => o.api_side_id === data.side)?.line)} />
+                            <OddButton game={game as any} option={data.spread?.options.find(o => o.api_side_id === data.side)} marketName="Point Spread" lineLabel={formatSpreadLine(data.spread?.options.find(o => o.api_side_id === data.side)?.line)} />
                         </div>
                         <div className="grid grid-cols-2 gap-1">
-                            <OddButton game={game} option={data.pointsMarket?.options.find(o => o.api_side_id === 'over')} marketName={`${data.team} Points`} lineLabel={`O ${data.pointsMarket?.options.find(o => o.api_side_id === 'over')?.line || ''}`} />
-                            <OddButton game={game} option={data.pointsMarket?.options.find(o => o.api_side_id === 'under')} marketName={`${data.team} Points`} lineLabel={`U ${data.pointsMarket?.options.find(o => o.api_side_id === 'under')?.line || ''}`} />
+                            <OddButton game={game as any} option={data.pointsMarket?.options.find(o => o.api_side_id === 'over')} marketName={`${data.team} Points`} lineLabel={`O ${data.pointsMarket?.options.find(o => o.api_side_id === 'over')?.line || ''}`} />
+                            <OddButton game={game as any} option={data.pointsMarket?.options.find(o => o.api_side_id === 'under')} marketName={`${data.team} Points`} lineLabel={`U ${data.pointsMarket?.options.find(o => o.api_side_id === 'under')?.line || ''}`} />
                         </div>
                         <div className="flex items-center">
-                            <OddButton game={game} option={data.moneyline?.options.find(o => o.api_side_id === data.side)} marketName="Moneyline" lineLabel={getMoneylineLabel(data.moneyline?.options.find(o => o.api_side_id === data.side))} />
+                            <OddButton game={game as any} option={data.moneyline?.options.find(o => o.api_side_id === data.side)} marketName="Moneyline" lineLabel={getMoneylineLabel(data.moneyline?.options.find(o => o.api_side_id === data.side))} />
                         </div>
                     </React.Fragment>
                 ))}
@@ -100,7 +100,7 @@ const GameCard: React.FC<GameCardProps> = ({ initialGame }) => {
 
 
 const GameList: React.FC = () => {
-    const [initialGames, setInitialGames] = useState<{id: number, game_time: string}[]>([]);
+    const [gameIds, setGameIds] = useState<number[]>([]);
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState<string | null>(null);
 
@@ -109,16 +109,16 @@ const GameList: React.FC = () => {
             setLoading(true);
             const { data, error } = await supabase
                 .from('games')
-                .select('id, game_time')
-                .gte('game_time', new Date(Date.now() - 6 * 60 * 60 * 1000).toISOString())
-                .filter('status', 'not.in', '("final","completed","ft")')
+                .select('id')
+                .gte('game_time', new Date(Date.now() - 6 * 60 * 60 * 1000).toISOString()) // gte = greater than or equal
+                .ilike('status', 'scheduled')
                 .order('game_time', { ascending: true });
 
             if(error) {
                 setError('Failed to load game list.');
                 console.error(error);
             } else {
-                setInitialGames(data || []);
+                setGameIds(data.map(g => g.id));
             }
             setLoading(false);
         };
@@ -130,8 +130,8 @@ const GameList: React.FC = () => {
 
     return (
         <div className="space-y-4">
-            {initialGames.length > 0 ? (
-                initialGames.map(game => <GameCard key={game.id} initialGame={game} />)
+            {gameIds.length > 0 ? (
+                gameIds.map(id => <GameCard key={id} gameId={id} />)
             ) : (
                 <div className="text-center py-16 bg-sleeper-surface rounded-lg shadow-inner border border-dashed border-sleeper-border">
                     <InboxIcon className="mx-auto h-16 w-16 text-sleeper-text-secondary opacity-40"/>
